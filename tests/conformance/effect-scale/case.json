@@ -1,0 +1,12 @@
+{
+  "type": "effect-scale",
+  "heights": [720, 1080, 2160],
+  "dotCore": 0.012,
+  "wireWidth": 0.002,
+  "haloRadius": 0.03,
+  "trailLength": 25.5,
+  "trailWidth": 0.012,
+  "bloomRadius": 1.0,
+  "backgroundFeatureRadius": 0.48,
+  "note": "Background radii are normalized band geometry and remain invariant; only pixel-sized soft effects scale with output density."
+}

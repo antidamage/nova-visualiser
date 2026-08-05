@@ -1,0 +1,7 @@
+{
+  "type": "glow-overlay",
+  "heights": [720, 1080, 2160],
+  "blurAmounts": [0, 1, 7.5, 20],
+  "blendValues": [0, 0.25, 0.4999, 0.5, 0.75, 1, 1.4999, 1.5, 2],
+  "note": "Formula test, not a render test. Locks the final glow-overlay pass that both engines implement as fragment shaders (src/shaders/glow_blur.frag + glow_overlay.frag here, phonoscope_glow_blur + phonoscope_glow_overlay in PhonoscopeShader.metal). Covers the blur's sigma mapping and tap weights, the screen/multiply/overlay blends, and the points where the driven blend-mode parameter snaps from one mode to the next. The grid is defined in runGlowOverlayCase() and mirrored by ParitySelfTests.testGlowOverlayParity(); changing either means changing both and re-recording expected.json."
+}

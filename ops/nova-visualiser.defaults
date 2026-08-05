@@ -1,0 +1,38 @@
+# /etc/default/nova-visualiser
+#
+# Apple TV rung: 4K60 HEVC Main10. AppleTV6,2 (Apple TV 4K, A10X) decodes this
+# in hardware; it has no AV1 decoder, and Turing NVENC has no AV1 encoder, so
+# HEVC is the ceiling on both ends rather than a compromise.
+NOVA_VISUALISER_DASHBOARD=http://127.0.0.1
+NOVA_VISUALISER_STREAM_PORT=8770
+NOVA_VISUALISER_CONTROL_PORT=8771
+NOVA_VISUALISER_SIZE=3840x2160
+NOVA_VISUALISER_FPS=60
+# The first-generation Apple TV 4K can hardware-decode 4K60 Main10, but its
+# libsrt receive path tops out on packet cadence before codec throughput. A
+# 16 Mbps HEVC stream halves SRT message pressure while retaining 4K geometry;
+# steady 60 Hz presentation is more important than spending bits on grain.
+NOVA_VISUALISER_BITRATE=16000000
+
+# SRT rung, offered alongside the TCP rung above rather than replacing it. TCP
+# head-of-line blocking is what turns a WiFi hiccup into a visible stall, so the
+# Apple TV prefers this and falls back to 8770 if it cannot connect. SRT's TSBPD
+# also provides the receive-side pacing the client used to lack entirely.
+# Latency is the ARQ budget: retransmits happen inside it and are abandoned
+# outside it. 0 disables the rung.
+# Encode cadence while nothing is playing. Near-static scene + CBR rung means
+# a full-rate encode just pads a still picture. Set to 60 to disable.
+NOVA_VISUALISER_IDLE_FPS=15
+NOVA_VISUALISER_SRT_PORT=8772
+NOVA_VISUALISER_SRT_LATENCY=60
+
+# Browser rung: 1080p60 H.264 via a MediaMTX sidecar, which republishes as
+# WebRTC/WHEP and LL-HLS. Browsers cannot decode HEVC over WebRTC, and the wall
+# kiosk does not need 4K. Set empty to disable.
+NOVA_VISUALISER_PUBLISH=rtsp://127.0.0.1:8554/visualiser
+NOVA_VISUALISER_PUBLISH_SIZE=1920x1080
+NOVA_VISUALISER_PUBLISH_BITRATE=8000000
+
+# Seconds with no connected client before the GPU resources are released back to
+# the voice stack, which shares this card and has only a few GB of headroom.
+NOVA_VISUALISER_IDLE_RELEASE=30

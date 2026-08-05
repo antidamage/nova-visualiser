@@ -1,0 +1,53 @@
+# MediaMTX for the visualiser's browser rung.
+#
+# nova-visualiser pushes 1080p60 H.264 here over RTSP on loopback; MediaMTX
+# republishes it as WebRTC/WHEP (for the dashboard and the wall kiosk) and
+# LL-HLS (as a fallback). Browsers cannot decode HEVC over WebRTC, which is why
+# the browser rung is H.264 and separate from the Apple TV's 4K HEVC feed.
+#
+# Scope is deliberately narrow: one path, no recording, no authentication beyond
+# the LAN, and nothing else on this box depends on it running.
+
+logLevel: warn
+logDestinations: [stdout]
+
+# RTSP is ingest-only and bound to loopback: the only publisher is the renderer
+# running on this same host.
+rtsp: yes
+rtspAddress: 127.0.0.1:8554
+rtspTransports: [tcp]
+rtmp: no
+srt: no
+
+# WebRTC is the one that matters — sub-200 ms in Brave, Chromium and Safari, so
+# the kiosk stays visually in time with the music playing in the room.
+webrtc: yes
+webrtcAddress: :8889
+webrtcLocalUDPAddress: :8189
+# Household LAN only; no STUN/TURN, no external candidates.
+webrtcIPsFromInterfaces: yes
+
+# LL-HLS as the fallback for anything that cannot do WebRTC.
+hls: yes
+hlsAddress: :8890
+hlsVariant: lowLatency
+hlsPartDuration: 200ms
+hlsSegmentCount: 7
+hlsAlwaysRemux: no
+
+# The renderer polls this to learn whether any browser is actually watching.
+# Without it, an established RTSP publish looks like demand forever and the
+# service never releases its GPU resources back to the voice stack.
+api: yes
+apiAddress: 127.0.0.1:9997
+
+metrics: no
+pprof: no
+playback: no
+
+paths:
+  visualiser:
+    source: publisher
+    # Drop the feed when nobody is watching so the renderer's browser rung and
+    # this process both idle instead of encoding for an empty room.
+    runOnDemandCloseAfter: 10s
