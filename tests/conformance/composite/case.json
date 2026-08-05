@@ -1,0 +1,5 @@
+{
+  "type": "composite",
+  "intensity": 1.45,
+  "note": "Formula test, not a render test. Locks the composite arithmetic that both engines implement as a fragment shader (src/shaders/composite.frag and phonoscope_composite in PhonoscopeShader.metal). The grid is defined in runCompositeCase() and mirrored by ParitySelfTests.testCompositeParity(); changing either means changing both and re-recording expected.json."
+}

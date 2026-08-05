@@ -1,0 +1,28 @@
+[Unit]
+Description=MediaMTX sidecar for the Nova visualiser browser rung
+After=network-online.target
+Wants=network-online.target
+# Independent of nova-visualiser on purpose: either can restart without the
+# other, and neither is a dependency of the dashboard or the voice stack.
+
+[Service]
+Type=simple
+User=antidamage
+Group=antidamage
+WorkingDirectory=/opt/nova-visualiser
+ExecStart=/opt/nova-visualiser/bin/mediamtx /opt/nova-visualiser/mediamtx.yml
+Restart=on-failure
+RestartSec=5
+Nice=5
+
+MemoryHigh=256M
+MemoryMax=384M
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/opt/nova-visualiser
+
+[Install]
+WantedBy=multi-user.target

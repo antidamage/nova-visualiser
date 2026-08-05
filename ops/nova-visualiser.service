@@ -1,0 +1,68 @@
+[Unit]
+Description=Nova visualiser (GPU Phonoscope renderer and stream server)
+Documentation=file:/opt/nova-visualiser/README.md
+After=network-online.target
+Wants=network-online.target
+# Give up rather than loop forever on a box that runs the whole house: a
+# renderer that cannot start should sit quiet and let the Apple TV fall back to
+# its local Metal engine. These belong in [Unit], not [Service].
+StartLimitIntervalSec=300
+StartLimitBurst=5
+# Deliberately NOT a dependency of nova-ha-dashboard or nova-voice, and nothing
+# depends on this. The visualiser is entertainment; home control and the voice
+# assistant must never be affected by it stopping, crashing or being upgraded.
+
+[Service]
+Type=simple
+User=antidamage
+Group=antidamage
+WorkingDirectory=/opt/nova-visualiser
+EnvironmentFile=-/etc/default/nova-visualiser
+ExecStart=/opt/nova-visualiser/bin/nova-visualiser \
+  --dashboard ${NOVA_VISUALISER_DASHBOARD} \
+  --stream-port ${NOVA_VISUALISER_STREAM_PORT} \
+  --control-port ${NOVA_VISUALISER_CONTROL_PORT} \
+  --idle-fps ${NOVA_VISUALISER_IDLE_FPS} \
+  --srt-port ${NOVA_VISUALISER_SRT_PORT} \
+  --srt-latency ${NOVA_VISUALISER_SRT_LATENCY} \
+  --size ${NOVA_VISUALISER_SIZE} \
+  --fps ${NOVA_VISUALISER_FPS} \
+  --bitrate ${NOVA_VISUALISER_BITRATE} \
+  --publish ${NOVA_VISUALISER_PUBLISH} \
+  --publish-size ${NOVA_VISUALISER_PUBLISH_SIZE} \
+  --publish-bitrate ${NOVA_VISUALISER_PUBLISH_BITRATE} \
+  --idle-release ${NOVA_VISUALISER_IDLE_RELEASE}
+
+Restart=on-failure
+RestartSec=5
+# Backstop for the in-process shutdown watchdog. CUDA teardown can wedge inside
+# the driver, and the default 90 s stop timeout leaves the unit "deactivating"
+# far too long on this host.
+TimeoutStopSec=15
+
+# The engine is CPU-light (the simulation is ~1 ms per tick); the GPU work is
+# what matters. Nice it below the voice stack so a busy inference never has to
+# wait behind frame pacing.
+Nice=5
+IOSchedulingClass=best-effort
+IOSchedulingPriority=6
+
+# Host RAM cap. VRAM is bounded separately by the service itself, which releases
+# its GL and encoder resources when no client is connected.
+MemoryHigh=1G
+MemoryMax=1500M
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/opt/nova-visualiser
+# The NVIDIA device nodes are the whole point of this unit.
+DeviceAllow=/dev/nvidiactl rw
+DeviceAllow=/dev/nvidia0 rw
+DeviceAllow=/dev/nvidia-uvm rw
+DeviceAllow=/dev/nvidia-uvm-tools rw
+DeviceAllow=/dev/nvidia-modeset rw
+
+[Install]
+WantedBy=multi-user.target

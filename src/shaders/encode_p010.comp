@@ -1,0 +1,109 @@
+#version 460 core
+
+// Tonemap + RGB -> P010 (10-bit 4:2:0) conversion, written straight into the
+// buffer NVENC reads. This is the pass that keeps the pipeline GPU-resident:
+// the output buffer is registered with CUDA, so the encoder consumes it with no
+// host copy and no glReadPixels. A 4K RGBA readback would be ~2 GB/s over PCIe
+// plus a CPU colour convert, which is the whole reason the tvOS design could
+// not scale.
+//
+// P010 layout, which is what NVENC expects for HEVC Main10:
+//   Y plane : one uint16 per pixel, sample in the HIGH 10 bits
+//   UV plane: interleaved Cb,Cr uint16 pairs at half resolution
+//
+// Each invocation owns one 2x2 pixel block. Because a block always starts on an
+// even column, its two horizontal luma samples land in the same 32-bit word --
+// so the plane is written with plain stores and needs no atomics and no clear.
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(binding = 0) uniform sampler2D sourceImage;
+
+layout(std430, binding = 1) writeonly buffer LumaPlane { uint luma[]; };
+layout(std430, binding = 2) writeonly buffer ChromaPlane { uint chroma[]; };
+
+uniform ivec2 outputSize;
+uniform ivec2 strideUints;   // x luma row stride, y chroma row stride
+uniform int limitedRange;    // 1 = BT.709 limited (64-940 / 64-960)
+uniform float exposure;
+uniform int flipY;
+
+// BT.709. The visualiser authors colours in sRGB primaries, so 709 keeps the
+// streamed image matching what the dashboard and the tvOS engine draw.
+vec3 rgbToYuv709(vec3 rgb) {
+  float y  = dot(rgb, vec3( 0.2126,  0.7152,  0.0722));
+  float cb = dot(rgb, vec3(-0.1146, -0.3854,  0.5000));
+  float cr = dot(rgb, vec3( 0.5000, -0.4542, -0.0458));
+  return vec3(y, cb + 0.5, cr + 0.5);
+}
+
+// This must match the native Metal composite target: it is `bgra8Unorm`, so
+// the selected theme's display-referred RGB values reach the screen unchanged
+// until the final UNORM clamp. Applying Reinhard plus an sRGB transfer here
+// made every selected backdrop colour brighter and less saturated than tvOS.
+vec3 displayColor(vec3 color) {
+  return clamp(max(color, vec3(0.0)) * exposure, 0.0, 1.0);
+}
+
+// Ordered dither of +/- half a 10-bit code. 10 bits alone still contours on the
+// very slow background gradients these modules use.
+float dither(ivec2 position) {
+  const float pattern[16] = float[16](
+     0.0,  8.0,  2.0, 10.0,
+    12.0,  4.0, 14.0,  6.0,
+     3.0, 11.0,  1.0,  9.0,
+    15.0,  7.0, 13.0,  5.0
+  );
+  return (pattern[(position.y & 3) * 4 + (position.x & 3)] / 16.0) - 0.5;
+}
+
+// Returns a P010 sample: a 10-bit code shifted into the high bits of a uint16.
+uint quantise(float value, float low, float high, ivec2 position) {
+  float scaled = low + clamp(value, 0.0, 1.0) * (high - low);
+  float code = clamp(scaled * 1023.0 + dither(position), 0.0, 1023.0);
+  return uint(code + 0.5) << 6;
+}
+
+vec3 sampleScene(ivec2 position) {
+  ivec2 source = position;
+  // GL's framebuffer origin is bottom-left; video wants the top row first.
+  if (flipY == 1) source.y = outputSize.y - 1 - position.y;
+  return displayColor(texelFetch(sourceImage, source, 0).rgb);
+}
+
+void main() {
+  ivec2 block = ivec2(gl_GlobalInvocationID.xy);
+  ivec2 base = block * 2;
+  if (base.x >= outputSize.x || base.y >= outputSize.y) return;
+
+  float lumaLow = limitedRange == 1 ? 64.0 / 1023.0 : 0.0;
+  float lumaHigh = limitedRange == 1 ? 940.0 / 1023.0 : 1.0;
+  float chromaLow = limitedRange == 1 ? 64.0 / 1023.0 : 0.0;
+  float chromaHigh = limitedRange == 1 ? 960.0 / 1023.0 : 1.0;
+
+  vec3 chromaSum = vec3(0.0);
+  int sampleCount = 0;
+
+  for (int dy = 0; dy < 2; ++dy) {
+    int y = base.y + dy;
+    if (y >= outputSize.y) break;
+
+    uint lumaWord = 0u;
+    for (int dx = 0; dx < 2; ++dx) {
+      ivec2 position = ivec2(base.x + dx, y);
+      if (position.x >= outputSize.x) continue;
+      vec3 yuv = rgbToYuv709(sampleScene(position));
+      chromaSum += yuv;
+      ++sampleCount;
+      lumaWord |= quantise(yuv.x, lumaLow, lumaHigh, position) << (dx == 0 ? 0u : 16u);
+    }
+    // base.x is even, so both luma samples of this block share one 32-bit word.
+    luma[y * strideUints.x + block.x] = lumaWord;
+  }
+
+  if (sampleCount == 0) return;
+  vec3 averaged = chromaSum / float(sampleCount);
+  uint cb = quantise(averaged.y, chromaLow, chromaHigh, base);
+  uint cr = quantise(averaged.z, chromaLow, chromaHigh, base + ivec2(1, 0));
+  chroma[block.y * strideUints.y + block.x] = cb | (cr << 16);
+}
