@@ -1,18 +1,124 @@
 # nova-visualiser
 
-Headless GPU renderer for the Nova Phonoscope, running on **iridium** and
-streamed to the Apple TV.
+The GPU renderer for the Nova Phonoscope. It runs the Phonoscope engine headless
+on the GPU host, renders at 4K60, hardware-encodes with NVENC, and streams the
+result to the Apple TV and to browsers. Playback devices decode video rather than
+running the simulation themselves.
 
-The Apple TV used to run the whole visualiser itself — expression VM, scene
-graph, particle simulation and Metal renderer, all on an A10X. It cannot reach
-4K60 at the module spec's ceilings, and the tvOS renderer rebuilt and re-uploaded
-every particle on every draw. This service moves the engine onto iridium's
-RTX 2080 Ti, hardware-encodes the result, and turns the Apple TV into a thin
-client that shows video and sends commands back.
+## Where it fits
 
-**The Apple TV keeps its Metal engine permanently as a fallback.** Two
-independent implementations of `PHONOSCOPE_MODULE_SPEC.md` now exist, so
-`tests/conformance` exists to stop them drifting.
+| Component | Interface |
+|---|---|
+| Apple TV ([nova-appletv-dashboard](https://github.com/antidamage/nova-apple-tv)) | Bespoke TCP → `AVSampleBufferDisplayLayer`, HEVC Main10 |
+| Browsers and web dashboards | H.264 via a MediaMTX sidecar (WHEP, LL-HLS) |
+| [Nova HA Dashboard](https://github.com/antidamage/nova-ha-dashboard) | Serves config over SSE; receives house-party lighting frames |
+| Module sources | **nova-visualiser-modules**, validated against `tests/conformance` |
+
+The Apple TV keeps its own Metal implementation of the same module spec
+permanently, as the fallback when this service is unavailable. Two independent
+implementations therefore exist, and `tests/conformance` compares per-tick
+particle digests across both to detect drift.
+
+## What it does
+
+**Rendering.** One render serves every viewer. The target Apple TV's A10X cannot
+reach 4K60 at the module spec's ceilings, so the engine runs on the GPU host
+instead and the output is distributed as video.
+
+**Encoding.** HEVC Main10 for the Apple TV, which decodes it in hardware. The
+output is almost entirely smooth gradients and bloom, which band at 8-bit, so
+10-bit is required rather than preferred. H.264 via the MediaMTX sidecar for
+browsers, which cannot decode HEVC over WebRTC.
+
+**Latency.** Access units are fed to the decoder directly rather than through HLS
+segmenting and player buffering, costing roughly one frame of pipeline.
+
+**Isolation.** Its own systemd unit, which nothing depends on and which depends
+on nothing. Stopping, crashing or upgrading it cannot affect home control or the
+voice stack.
+
+**VRAM management.** GL and encoder resources are released when no client is
+connected, returning VRAM to the voice stack. The GPU is shared: the voice stack
+holds roughly 6.5 GB of the card's 11 GB.
+
+**Client handling.** Each stream client gets its own writer thread. A slow client
+is dropped to the next IDR and never applies back-pressure to the GPU.
+
+## Install
+
+The build happens natively on the GPU host — it is the only Linux box with the
+card — matching the dashboard's build-on-host pattern.
+
+### Prerequisites
+
+The host ships the **compute-only** NVIDIA driver, which has no NVENC and no
+EGL/GL. Add the matching userspace at the **exact same version** as the running
+kernel module:
+
+```sh
+sudo apt-get install libnvidia-gl-580-server libnvidia-encode-580-server
+```
+
+> Matching the version matters: a mismatch breaks CUDA for the voice stack. This
+> install is purely additive — it upgrades nothing and reloads no kernel module.
+
+Build tooling:
+
+```sh
+sudo apt-get install cmake ninja-build g++ glslang-tools libavcodec-dev \
+  libavformat-dev libavutil-dev libepoxy-dev libegl-dev libfreetype-dev \
+  libpng-dev pkg-config
+```
+
+FreeType and libpng draw the centre slot — the message and the image
+respectively. Both are required rather than optional: the centre slot is part of
+the streamed picture, so a build that silently could not draw one would be a
+parity regression against the Apple TV rather than a degraded transport.
+
+### Build and deploy
+
+```powershell
+# From the repo root, in PowerShell (not Git Bash).
+.\deploy-nova-visualiser.ps1               # build, conformance, probe, install, start
+.\deploy-nova-visualiser.ps1 -SelfTestOnly # build and measure, install nothing
+```
+
+The deploy script runs the conformance corpus and a GPU capability probe before
+installing anything.
+
+## Verifying a running instance
+
+```sh
+curl -s http://iridium.local:8771/status | python3 -m json.tool
+/opt/nova-visualiser/bin/nova-visualiser-probe          # GPU capability
+/opt/nova-visualiser/bin/nova-visualiser-conformance \
+    --corpus /opt/nova-visualiser/tests/conformance     # cross-engine parity
+```
+
+Offline modes for when something looks wrong:
+
+```sh
+nova-visualiser --self-test 300 --publish ""     # render + encode timing
+nova-visualiser --dump-frame /tmp/frame.ppm      # one composited frame + stage report
+```
+
+`--dump-frame` reports each pass's brightness separately in colour and alpha,
+which is how a dark frame gets diagnosed rather than guessed at.
+
+## Conformance
+
+```sh
+nova-visualiser-conformance --corpus tests/conformance
+nova-visualiser-conformance --corpus tests/conformance --update   # rebaseline
+```
+
+Each case is a compiled module plus a fixed input trace; the runner emits
+per-tick digests of particle state. **Only pass `--update` when a spec change is
+intended, and update the tvOS side in the same commit.**
+
+Determinism requires the per-module random seed to be an explicit FNV-1a over the
+module id on both engines. Swift's `String.hashValue` is salted per process and
+differs between launches, so it cannot be used here.
 
 ## Layout
 
@@ -29,105 +135,26 @@ ops/          systemd units, MediaMTX config, defaults
 tests/        conformance corpus
 ```
 
-## Why these choices
-
-| Decision | Reason |
-|---|---|
-| **GLSL, not HLSL** | Linux + NVIDIA: GLSL is first-class and `glslang` is packaged. HLSL would mean adding DXC for no gain — there is no D3D target. Modules never carry shader source, so this is engine-internal either way. |
-| **OpenGL 4.6 via headless EGL, not Vulkan** | `EGL_EXT_platform_device` gives a GPU context with no X server. The workload is one instanced draw plus a few fullscreen passes; Vulkan's submission parallelism would buy nothing for several thousand lines of boilerplate. The NVIDIA Vulkan ICD is installed anyway if that ever changes. |
-| **HEVC Main10 for the Apple TV** | AppleTV6,2 (Apple TV 4K, A10X) decodes HEVC Main10 4K60 in hardware and has no AV1 decoder; Turing NVENC has no AV1 encoder. 10-bit is deliberate: this visualiser is almost entirely smooth gradients and bloom, which band badly at 8-bit. |
-| **Bespoke TCP, not HLS** | Even low-latency HLS adds segmenting, playlists and AVPlayer buffering. Feeding `AVSampleBufferDisplayLayer` directly is hardware decode with about one frame of pipeline. |
-| **H.264 + MediaMTX for browsers** | Browsers cannot decode HEVC over WebRTC. The sidecar supplies WHEP and LL-HLS so this service never has to implement SDP/ICE/DTLS/SRTP. |
-| **Fixed 1/120 s simulation step** | Makes simulation outcome independent of render rate, lets the renderer interpolate, and is what makes the conformance corpus reproducible at all. |
-
-## Threading
+### Threads
 
 | Thread | Owns |
 |---|---|
 | config | HTTP + SSE against the dashboard; publishes immutable config snapshots |
-| simulation | fixed 1/120 s accumulator; publishes scene snapshots; never blocks on the renderer |
-| render | the sole GL context, plus CUDA interop and NVENC (`cuGraphicsMapResources` needs the GL context current on the calling thread). Paced by a monotonic deadline — there is no display and therefore no vsync |
-| writers | one per stream client; a slow client is dropped to the next IDR and never applies back-pressure to the GPU |
-| lighting | house-party frames to the dashboard |
-| control | status and commands |
+| simulation | Fixed 1/120 s accumulator; publishes scene snapshots; never blocks on the renderer |
+| render | The sole GL context, plus CUDA interop and NVENC (`cuGraphicsMapResources` needs the GL context current on the calling thread). Paced by a monotonic deadline — there is no display and therefore no vsync |
+| writers | One per stream client; a slow client is dropped to the next IDR |
+| lighting | House-party frames to the dashboard |
+| control | Status and commands |
 
-## Stability
+### Constraints worth knowing before changing things
 
-The GPU is shared with the voice stack, which holds ~6.5 GB of the card's 11 GB.
-So:
-
-- this is its own systemd unit; **nothing depends on it and it depends on
-  nothing**. Stopping, crashing or upgrading it cannot affect home control or
-  the voice assistant;
-- GL and encoder resources are **released when no client is connected**, giving
-  the VRAM back between parties;
-- dynamic resolution scales the *scene* only. The encode surface stays 4K, so
-  the stream resolution never changes under a client. It reacts to render cost
-  alone — shrinking the scene does nothing for an encoder bottleneck;
-- shutdown has a watchdog, because CUDA teardown can deadlock inside
-  `libnvcuvid` and a unit stuck in `deactivating` on this box is unacceptable.
-
-## Building and deploying
-
-```powershell
-# From the repo root, in PowerShell (not Git Bash).
-.\deploy-nova-visualiser.ps1              # build, conformance, probe, install, start
-.\deploy-nova-visualiser.ps1 -SelfTestOnly # build and measure, install nothing
-```
-
-The build happens natively on iridium — it is the only Linux box with the GPU —
-matching the dashboard's build-on-host pattern. Iridium's login shell is fish,
-so remote scripts are base64-encoded and piped into `bash -s`.
-
-### Prerequisites on iridium
-
-The box ships the **compute-only** NVIDIA driver, which has no NVENC and no
-EGL/GL. Add the matching userspace at the **exact same version** as the running
-kernel module:
-
-```sh
-sudo apt-get install libnvidia-gl-580-server libnvidia-encode-580-server
-```
-
-Matching the version matters: a mismatch breaks CUDA for the voice stack. This
-install is purely additive — it upgrades nothing and reloads no kernel module.
-
-Build tooling: `cmake ninja-build g++ glslang-tools libavcodec-dev
-libavformat-dev libavutil-dev libepoxy-dev libegl-dev pkg-config`.
-
-## Checking it
-
-```sh
-curl -s http://iridium.local:8771/status | python3 -m json.tool
-/opt/nova-visualiser/bin/nova-visualiser-probe          # GPU capability
-/opt/nova-visualiser/bin/nova-visualiser-conformance \
-    --corpus /opt/nova-visualiser/tests/conformance     # cross-engine parity
-```
-
-Offline modes, useful when something looks wrong:
-
-```sh
-nova-visualiser --self-test 300 --publish ""     # render + encode timing
-nova-visualiser --dump-frame /tmp/frame.ppm      # one composited frame + stage report
-```
-
-`--dump-frame` reports the brightness of each pass separately in colour and
-alpha, which is how a dark frame gets diagnosed rather than guessed at.
-
-## Conformance
-
-The Apple TV runs its own Metal implementation of the same module spec, so the
-two will drift unless drift is detectable.
-
-```sh
-nova-visualiser-conformance --corpus tests/conformance
-nova-visualiser-conformance --corpus tests/conformance --update   # rebaseline
-```
-
-Each case is a compiled module plus a fixed input trace; the runner emits
-per-tick digests of the particle state. **Only `--update` when a spec change is
-intended, and update the tvOS side in the same commit.**
-
-Determinism required one behavioural change on both engines: the per-module
-random seed is now an explicit FNV-1a over the module id, not Swift's
-`String.hashValue`, which is salted per process and so differed between launches.
+| Choice | Constraint behind it |
+|---|---|
+| **GLSL, not HLSL** | Linux + NVIDIA: GLSL is first-class and `glslang` is packaged; there is no D3D target. Modules never carry shader source, so this stays engine-internal. |
+| **OpenGL 4.6 via headless EGL, not Vulkan** | `EGL_EXT_platform_device` gives a GPU context with no X server. The workload is one instanced draw plus a few fullscreen passes; Vulkan's submission parallelism buys nothing for thousands of lines of boilerplate. |
+| **HEVC Main10** | The target Apple TV decodes HEVC Main10 4K60 in hardware and has no AV1 decoder; Turing NVENC has no AV1 encoder. |
+| **Bespoke TCP, not HLS** | Even low-latency HLS adds segmenting, playlists and player buffering. |
+| **H.264 + MediaMTX for browsers** | Browsers cannot decode HEVC over WebRTC. The sidecar supplies WHEP and LL-HLS so this service never implements SDP/ICE/DTLS/SRTP. |
+| **Fixed 1/120 s simulation step** | Makes simulation outcome independent of render rate, lets the renderer interpolate, and is what makes the conformance corpus reproducible at all. |
+| **Dynamic resolution scales the scene only** | The encode surface stays 4K, so stream resolution never changes under a client. It reacts to render cost alone — shrinking the scene does nothing for an encoder bottleneck. |
+| **Shutdown has a watchdog** | CUDA teardown can deadlock inside `libnvcuvid`, and a unit stuck in `deactivating` on this host is unacceptable. |

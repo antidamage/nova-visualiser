@@ -1,0 +1,4 @@
+{
+  "type": "background-band",
+  "note": "Formula test, not a render test. Locks the backdrop band's geometry and the frame vignette, which both engines implement as fragment shaders (src/shaders/fluid_background.frag here, phonoscope_fluid_background in PhonoscopeShader.metal). Covers where the centred band sits at a given height and width, the one-pixel softening of its clip edge, the four PhonoscopeEdgeVignette gradients and the source-over product that combines them, the vignetteSize scaling that keeps the 0.18/0.28 ratio, and the rule that outside the band is solid vignette colour rather than a hole. The blob field itself is not locked -- it is stood in for by a flat fieldColor, because drift in the field reads as a different picture rather than a different layout. The grid is defined in runBackgroundBandCase() and mirrored by ParitySelfTests.testBackgroundBandParity(); changing either means changing both and re-recording expected.json."
+}

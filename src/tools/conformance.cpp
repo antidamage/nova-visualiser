@@ -12,19 +12,27 @@
 // `--update` rewrites each case's `expected.json`. Only do that when a spec
 // change is intended, and update the tvOS side in the same commit.
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <iostream>
+#include <limits>
 #include <sstream>
 #include <string>
+#include <tuple>
+#include <unordered_map>
 #include <vector>
 
+#include "core/background_band_reference.h"
+#include "core/centre_image_reference.h"
 #include "core/composite_reference.h"
 #include "core/effect_scale.h"
 #include "core/glow_overlay_reference.h"
 #include "core/json.h"
+#include "core/parameter_drivers.h"
 #include "core/simulation.h"
 
 namespace fs = std::filesystem;
@@ -163,6 +171,245 @@ CaseResult runCompositeCase(const fs::path& directory, bool update, CaseResult r
   return finishCase(std::move(result), directory, buffer, update);
 }
 
+// Backdrop-band-formula case. NOT a render test -- it evaluates
+// `backgroundBandReference()` over a grid of sample points and band geometries
+// and digests the result. `ParitySelfTests.testBackgroundBandParity()` evaluates
+// the identical grid on tvOS.
+//
+// The band used to be a hardcoded 1/3 constant here and a SwiftUI frame there,
+// with the vignette as five magic numbers in each shader. Now that all four of
+// height, width, vignette opacity and vignette size are driven, the layout is
+// the thing most likely to drift, so the layout is what gets locked. The sample
+// points deliberately straddle every boundary: the band's clip edge, the corners
+// where two edge gradients overlap, the centre where none reach, and the region
+// outside the band that must come out as solid vignette colour.
+CaseResult runBackgroundBandCase(const fs::path& directory, bool update, CaseResult result,
+                                 const nova::json::Value& caseValue) {
+  auto numbers = [&caseValue](const char* name, std::vector<double> fallback) {
+    const nova::json::Value* value = caseValue.find(name);
+    if (value == nullptr) return fallback;
+    std::vector<double> parsed = value->numberArray();
+    return parsed.empty() ? fallback : parsed;
+  };
+
+  const std::vector<double> heights = numbers("heightFractions", {0.0, 1.0 / 3.0, 0.5, 1.0});
+  const std::vector<double> widths = numbers("widthFractions", {0.25, 0.6, 1.0});
+  const std::vector<double> opacities = numbers("vignetteOpacities", {0.0, 0.5, 0.96, 1.0});
+  const std::vector<double> sizes = numbers("vignetteSizes", {0.0, 1.0, 2.5});
+  // Straddles the band edge at the default 1/3 height (0.3333 and 0.6667), both
+  // corners, and the centre.
+  const std::vector<double> us = numbers("samplesU", {0.0, 0.09, 0.2, 0.5, 0.91, 1.0});
+  const std::vector<double> vs = numbers("samplesV", {0.0, 0.3333, 0.4, 0.5, 0.6667, 1.0});
+
+  uint64_t hash = 1469598103934665603ULL;
+  auto mix = [&hash](float value) {
+    const long long quantised = static_cast<long long>(std::llround(value * 10000.0f));
+    for (int byte = 0; byte < 8; ++byte) {
+      hash = (hash ^ static_cast<uint64_t>((quantised >> (byte * 8)) & 0xff)) * 1099511628211ULL;
+    }
+  };
+
+  int samples = 0;
+  for (double height : heights) {
+    for (double width : widths) {
+      for (double opacity : opacities) {
+        for (double size : sizes) {
+          for (double u : us) {
+            for (double v : vs) {
+              nova::BackgroundBandInput input;
+              input.u = static_cast<float>(u);
+              input.v = static_cast<float>(v);
+              input.heightFraction = static_cast<float>(height);
+              input.widthFraction = static_cast<float>(width);
+              // The band's own pixel size at 4K, which is what the renderer
+              // passes and what sets the softness of the clip edge.
+              input.bandPixelWidth = static_cast<float>(3840.0 * width);
+              input.bandPixelHeight = static_cast<float>(2160.0 * height);
+              // Not black, so a mistake that collapses the vignette to a plain
+              // darken is distinguishable from one that tints correctly.
+              input.vignetteColor = {0.06f, 0.02f, 0.14f};
+              input.vignetteOpacity = static_cast<float>(opacity);
+              input.vignetteSize = static_cast<float>(size);
+              input.fieldColor = {0.62f, 0.48f, 0.71f};
+              const nova::BackgroundBandOutput out = nova::backgroundBandReference(input);
+              mix(out.inBand);
+              mix(out.vignetteShade);
+              mix(out.color.x);
+              mix(out.color.y);
+              mix(out.color.z);
+              mix(out.color.w);
+              ++samples;
+            }
+          }
+        }
+      }
+    }
+  }
+
+  char buffer[64];
+  std::snprintf(buffer, sizeof(buffer), "[\"background-band:%d:%016llx\"]", samples,
+                static_cast<unsigned long long>(hash));
+  return finishCase(std::move(result), directory, buffer, update);
+}
+
+// Centre-image-formula case. NOT a render test -- it evaluates
+// `centreImageHalfExtent()` and `centreImageFade()` over a grid of frame and
+// image aspects, scales and fade times, and digests the result.
+// `ParitySelfTests.testCentreImageParity()` evaluates the identical grid on tvOS.
+//
+// The centre slot holds either a message or an image, at one place and on one
+// scale axis. The image half is where the two engines can silently disagree:
+// this one fits and scales in a shader uniform, tvOS in a SwiftUI modifier. The
+// contain-fit is the thing that drifts, so the contain-fit is what gets locked.
+CaseResult runCentreImageCase(const fs::path& directory, bool update, CaseResult result,
+                              const nova::json::Value& caseValue) {
+  auto numbers = [&caseValue](const char* key, std::vector<double> fallback) {
+    const nova::json::Value* value = caseValue.find(key);
+    std::vector<double> parsed = value != nullptr ? value->numberArray() : std::vector<double>{};
+    return parsed.empty() ? fallback : parsed;
+  };
+  // 16:9 and 21:9 frames; images from a tall crest through square to a wide
+  // banner, deliberately straddling the frame's own aspect in both directions
+  // because that is which branch of the fit is taken.
+  const std::vector<double> frameAspects = numbers("frameAspects", {16.0 / 9.0, 21.0 / 9.0});
+  const std::vector<double> imageAspects =
+      numbers("imageAspects", {0.5, 1.0, 16.0 / 9.0, 2.5, 4.0});
+  // Both clamp ends, the identity, and values either side of them.
+  const std::vector<double> scales = numbers("scales", {0.0, 0.1, 0.5, 1.0, 2.75, 5.0, 9.0});
+  // The base height, as a fraction: nothing, the default third, full frame, and
+  // an out-of-range value that must clamp rather than run away.
+  const std::vector<double> heights = numbers("heightFractions", {0.0, 0.33, 1.0, 1.5});
+
+  uint64_t hash = 1469598103934665603ULL;
+  auto mix = [&hash](float value) {
+    const long long quantised = static_cast<long long>(std::llround(value * 10000.0f));
+    for (int byte = 0; byte < 8; ++byte) {
+      hash = (hash ^ static_cast<uint64_t>((quantised >> (byte * 8)) & 0xff)) * 1099511628211ULL;
+    }
+  };
+
+  int samples = 0;
+  for (double frameAspect : frameAspects) {
+    for (double imageAspect : imageAspects) {
+      for (double height : heights) {
+        for (double scale : scales) {
+          const nova::CentreImageExtent extent = nova::centreImageHalfExtent(
+              static_cast<float>(frameAspect), static_cast<float>(imageAspect),
+              static_cast<float>(height), static_cast<float>(scale));
+          mix(extent.halfWidth);
+          mix(extent.halfHeight);
+          ++samples;
+        }
+      }
+    }
+  }
+
+  // The cross-fade ramp, including both ends and a zero-length transition --
+  // which must resolve to "already there" rather than dividing by zero.
+  const std::vector<double> transitions = numbers("fadeTransitions", {0.0, 0.6, 2.5});
+  const std::vector<double> elapsed = numbers("fadeElapsed", {0.0, 0.15, 0.6, 1.2, 5.0});
+  for (double transition : transitions) {
+    for (double seconds : elapsed) {
+      mix(nova::centreImageFade(static_cast<float>(seconds), static_cast<float>(transition)));
+      ++samples;
+    }
+  }
+
+  char buffer[64];
+  std::snprintf(buffer, sizeof(buffer), "[\"centre-image:%d:%016llx\"]", samples,
+                static_cast<unsigned long long>(hash));
+  return finishCase(std::move(result), directory, buffer, update);
+}
+
+// Scene-blend-formula case. The four modes the scene layer can meet the backdrop
+// with, plus the points where the driven `__sceneBlend` axis snaps from one to
+// the next. Same grid as `composite`, run once per mode -- Linear must reproduce
+// the composite case's own arithmetic exactly, which is what proves the default
+// picture is unchanged.
+CaseResult runSceneBlendCase(const fs::path& directory, bool update, CaseResult result,
+                             const nova::json::Value& caseValue) {
+  const float intensity = static_cast<float>(
+      caseValue.find("intensity") != nullptr ? caseValue.find("intensity")->numberOr(1.45) : 1.45);
+  std::vector<double> blendValues = caseValue.find("blendValues") != nullptr
+                                        ? caseValue.find("blendValues")->numberArray()
+                                        : std::vector<double>{};
+  if (blendValues.empty()) {
+    // Every mode, and every boundary either side of the snap.
+    blendValues = {0, 0.4999, 0.5, 1, 1.4999, 1.5, 2, 2.4999, 2.5, 3, 4};
+  }
+
+  const float coverages[] = {0.0f, 0.25f, 0.5f, 1.0f};
+  const float glows[] = {0.0f, 0.4f, 1.6f, 6.0f};
+  const float backgroundAlphas[] = {0.0f, 0.5f, 1.0f};
+
+  uint64_t hash = 1469598103934665603ULL;
+  auto mix = [&hash](float value) {
+    const long long quantised = static_cast<long long>(std::llround(value * 10000.0f));
+    for (int byte = 0; byte < 8; ++byte) {
+      hash = (hash ^ static_cast<uint64_t>((quantised >> (byte * 8)) & 0xff)) * 1099511628211ULL;
+    }
+  };
+
+  int samples = 0;
+  std::string invariant;
+  for (double blendValue : blendValues) {
+    const nova::SceneBlendMode mode = nova::sceneBlendModeFor(static_cast<float>(blendValue));
+    // The resolved mode is digested too, so a change to where the axis snaps
+    // fails here rather than silently shifting which look a stored range picks.
+    mix(static_cast<float>(static_cast<int>(mode)));
+    for (float coverage : coverages) {
+      for (float glow : glows) {
+        for (float backgroundAlpha : backgroundAlphas) {
+          nova::CompositeInput input;
+          input.scene = {0.9f * coverage, 0.35f * coverage, 0.15f * coverage, coverage};
+          input.bloom = {glow, glow * 0.6f, glow * 0.25f, glow};
+          input.background = {0.16f, 0.11f, 0.28f, backgroundAlpha};
+          input.intensity = intensity;
+          input.blendMode = mode;
+          const nova::Vec4 out = nova::compositeReference(input);
+
+          // The scene layer is an alpha mask, not a plate: where it covers
+          // nothing there is nothing to blend, so every mode must reduce
+          // exactly to Linear. Stated outright rather than left to the digest,
+          // because the digest cannot say WHICH property broke -- and the
+          // property that broke was this one. Multiply and overlay used to
+          // return black here, blanking the backdrop everywhere the lattice
+          // was not.
+          if (coverage == 0.0f && invariant.empty()) {
+            nova::CompositeInput linear = input;
+            linear.blendMode = nova::SceneBlendMode::Linear;
+            const nova::Vec4 reference = nova::compositeReference(linear);
+            const float tolerance = 1e-6f;
+            if (std::fabs(out.x - reference.x) > tolerance ||
+                std::fabs(out.y - reference.y) > tolerance ||
+                std::fabs(out.z - reference.z) > tolerance ||
+                std::fabs(out.w - reference.w) > tolerance) {
+              invariant = "uncovered scene pixel differs from Linear under blend mode " +
+                          std::to_string(static_cast<int>(mode));
+            }
+          }
+
+          mix(out.x);
+          mix(out.y);
+          mix(out.z);
+          mix(out.w);
+          ++samples;
+        }
+      }
+    }
+  }
+
+  if (!invariant.empty()) {
+    result.detail = invariant;
+    return result;
+  }
+
+  char buffer[64];
+  std::snprintf(buffer, sizeof(buffer), "[\"scene-blend:%d:%016llx\"]", samples,
+                static_cast<unsigned long long>(hash));
+  return finishCase(std::move(result), directory, buffer, update);
+}
+
 // Resolution adaptation is deliberately asymmetric: soft effects grow at 4K,
 // while the dot core and wire width do not. Both shader engines consume this
 // contract, and the tvOS self-test computes the identical digest.
@@ -257,21 +504,34 @@ CaseResult runGlowOverlayCase(const fs::path& directory, bool update, CaseResult
   const nova::GlowBlendMode modes[] = {nova::GlowBlendMode::Multiply,
                                        nova::GlowBlendMode::Screen,
                                        nova::GlowBlendMode::Overlay};
+  // 1 is the identity. 2.5 saturates a mid glow, and 10 is the top of the axis,
+  // where every non-black channel clamps -- the case the pre-clamp multiply
+  // exists to produce.
+  const float overdrives[] = {1.0f, 2.5f, 10.0f};
+  // Clamped first, so the original ordering keeps contributing in its original
+  // order and the unclamped run is appended.
+  const bool clampings[] = {true, false};
   for (nova::GlowBlendMode mode : modes) {
     for (float base : bases) {
       for (float glow : glows) {
         for (float opacity : opacities) {
-          nova::GlowOverlayInput input;
-          input.base = {base, base * 0.6f, base * 0.25f, 0.75f};
-          input.glow = {glow, glow * 0.5f, glow * 0.9f, 0.4f};
-          input.opacity = opacity;
-          input.mode = mode;
-          const nova::Vec4 out = nova::glowOverlayReference(input);
-          mix(out.x);
-          mix(out.y);
-          mix(out.z);
-          mix(out.w);
-          ++samples;
+          for (float overdrive : overdrives) {
+            for (bool clamped : clampings) {
+              nova::GlowOverlayInput input;
+              input.base = {base, base * 0.6f, base * 0.25f, 0.75f};
+              input.glow = {glow, glow * 0.5f, glow * 0.9f, 0.4f};
+              input.opacity = opacity;
+              input.overdrive = overdrive;
+              input.clamped = clamped;
+              input.mode = mode;
+              const nova::Vec4 out = nova::glowOverlayReference(input);
+              mix(out.x);
+              mix(out.y);
+              mix(out.z);
+              mix(out.w);
+              ++samples;
+            }
+          }
         }
       }
     }
@@ -287,6 +547,243 @@ CaseResult runGlowOverlayCase(const fs::path& directory, bool update, CaseResult
 
   char buffer[96];
   std::snprintf(buffer, sizeof(buffer), "[\"glow-overlay:%d:%016llx\"]", samples,
+                static_cast<unsigned long long>(hash));
+  return finishCase(std::move(result), directory, buffer, update);
+}
+
+// Parameter-driver case. Like the composite and glow-overlay cases this is a
+// formula test rather than a render test: it steps the lane evaluator through a
+// fixed script of frames and digests every resolved value.
+//
+// The script lives here rather than in case.json because all three engines have
+// to walk the identical scenarios, and a grid in code is the same shape as the
+// TypeScript reference's test file and the Swift self-test.
+// `ParitySelfTests.testParameterDriverParity()` mirrors it exactly; changing
+// either means changing both and re-recording expected.json.
+CaseResult runParameterDriversCase(const fs::path& directory, bool update, CaseResult result,
+                                   const nova::json::Value& caseValue) {
+  const double bpm = caseValue.find("bpm") != nullptr ? caseValue.find("bpm")->numberOr(120) : 120;
+  const int signature =
+      caseValue.find("timeSignature") != nullptr
+          ? static_cast<int>(caseValue.find("timeSignature")->numberOr(4))
+          : 4;
+
+  uint64_t hash = 1469598103934665603ULL;
+  int samples = 0;
+  auto mix = [&hash, &samples](double value) {
+    const long long quantised = static_cast<long long>(std::llround(value * 10000.0));
+    for (int byte = 0; byte < 8; ++byte) {
+      hash = (hash ^ static_cast<uint64_t>((quantised >> (byte * 8)) & 0xff)) * 1099511628211ULL;
+    }
+    ++samples;
+  };
+
+  nova::EffectDeclaration glow;
+  glow.id = "glow";
+  glow.min = 0;
+  glow.max = 10;
+  glow.step = 0.1;
+  glow.defaultValue = 0;
+  const std::unordered_map<std::string, nova::EffectDeclaration> declarations{{"glow", glow}};
+
+  auto driver = [](const std::string& type, int every = 1, int offset = 0, double interval = 4,
+                   const std::string& cadence = "beat", double transition = 0.5) {
+    nova::Driver value;
+    value.type = type;
+    value.every = every;
+    value.offset = offset;
+    value.intervalSeconds = interval;
+    value.cadence = cadence;
+    value.transitionSeconds = transition;
+    return value;
+  };
+  auto binding = [](const std::string& id, double min, double max, double attack, double hold,
+                    double release) {
+    nova::EffectBinding value;
+    value.id = id;
+    value.effect = "glow";
+    value.hasMin = true;
+    value.min = min;
+    value.hasMax = true;
+    value.max = max;
+    value.hasAttack = true;
+    value.attackSeconds = attack;
+    value.hasHold = true;
+    value.holdSeconds = hold;
+    value.hasRelease = true;
+    value.releaseSeconds = release;
+    return value;
+  };
+  auto frameAt = [bpm, signature](double time, double delta, int beatIndex, int barIndex,
+                                  uint64_t trackSeed) {
+    nova::SignalFrame frame;
+    frame.time = time;
+    frame.delta = delta;
+    frame.beatIndex = beatIndex;
+    frame.barIndex = barIndex;
+    frame.bpm = bpm;
+    frame.timeSignature = signature;
+    frame.energy = 0;
+    frame.trackSeed = trackSeed;
+    frame.spectrum.fill(0.0f);
+    return frame;
+  };
+  // Steps one lane set through `ticks` frames, mixing the resolved value each
+  // tick. `advance` decides how the clock and indices move per tick.
+  auto sweep = [&](const std::vector<nova::ScopedLane>& lanes,
+                   const std::unordered_map<std::string, nova::CombineMode>& combine, int ticks,
+                   const std::function<nova::SignalFrame(int)>& advance) {
+    nova::DriverStates states;
+    for (int tick = 0; tick < ticks; ++tick) {
+      const nova::LaneEvaluation evaluation =
+          nova::evaluateDriverLanes(lanes, combine, declarations, advance(tick), states);
+      const auto found = evaluation.values.find("glow");
+      mix(found == evaluation.values.end() ? -1.0 : found->second);
+    }
+  };
+  auto laneOf = [](const std::string& id, const nova::Driver& primary,
+                   const std::vector<nova::EffectBinding>& bindings,
+                   const std::vector<nova::Driver>& modifiers = {}) {
+    nova::DriverLane lane;
+    lane.id = id;
+    lane.driver = primary;
+    lane.modifiers = modifiers;
+    lane.bindings = bindings;
+    return lane;
+  };
+
+  // 1. The triggered attack/hold/release envelope, sampled straight through
+  //    attack, hold, release and back to idle.
+  sweep({{"g", laneOf("l", driver("beat"), {binding("b1", 0, 10, 0.1, 0.1, 0.2)})}}, {}, 12,
+        [&](int tick) { return frameAt(tick * 0.05, 0.05, 0, 0, 1); });
+
+  // 2. Retrigger part way through a release: the level must resume upward from
+  //    where it had fallen to rather than restarting at zero.
+  sweep({{"g", laneOf("l", driver("beat"), {binding("b1", 0, 10, 0.1, 0, 1.0)})}}, {}, 8,
+        [&](int tick) { return frameAt(tick * 0.05, 0.05, tick >= 3 ? 1 : 0, 0, 1); });
+
+  // 3. `every` and `offset` gating on both beat and downbeat.
+  for (const auto& [type, every, offset] :
+       std::vector<std::tuple<std::string, int, int>>{{"beat", 2, 0},
+                                                      {"beat", 3, 1},
+                                                      {"downbeat", 4, 0},
+                                                      {"downbeat", 4, 2},
+                                                      {"downbeat", 16, 0}}) {
+    sweep({{"g", laneOf("l", driver(type, every, offset), {binding("b1", 0, 10, 0, 0, 0)})}}, {}, 17,
+          [&](int tick) { return frameAt(tick, 0.05, tick, tick, 1); });
+  }
+
+  // 4. Modifier summation, including the deliberate overshoot past the
+  //    authored maximum.
+  sweep({{"g", laneOf("l", driver("downbeat"), {binding("b1", 0, 10, 0, 1, 0)},
+                      {driver("bass"), driver("treble")})}},
+        {}, 4, [&](int tick) {
+          nova::SignalFrame frame = frameAt(tick * 0.05, 0.05, 0, 0, 1);
+          frame.spectrum[0] = 0.5f;
+          frame.spectrum[25] = 0.25f;
+          return frame;
+        });
+
+  // 5. Add versus strongest across a frequent and a rare lane, including the
+  //    tick where only the frequent one fires.
+  const std::vector<nova::ScopedLane> stacked{
+      {"g", laneOf("beat", driver("beat"), {binding("b-beat", 0, 4, 0, 1, 0)})},
+      {"g", laneOf("down", driver("downbeat", 4), {binding("b-down", 0, 10, 0, 1, 0)})},
+      {"g", laneOf("song", driver("song"), {binding("b-song", 0, 6, 0, 1, 0)})}};
+  for (nova::CombineMode mode : {nova::CombineMode::Add, nova::CombineMode::Strongest}) {
+    sweep(stacked, {{"glow", mode}}, 10, [&](int tick) {
+      return frameAt(tick, 0.05, tick, tick, tick < 5 ? 1 : 2);
+    });
+  }
+
+  // 6. The overshoot guard: eight lanes that would otherwise reach eight times
+  //    the authored range.
+  {
+    std::vector<nova::ScopedLane> many;
+    for (int index = 0; index < 8; ++index) {
+      many.push_back({"g", laneOf("l" + std::to_string(index), driver("beat"),
+                                  {binding("b" + std::to_string(index), 0, 10, 0, 1, 0)})});
+    }
+    sweep(many, {{"glow", nova::CombineMode::Add}}, 3,
+          [&](int tick) { return frameAt(tick * 0.05, 0.05, 0, 0, 1); });
+  }
+
+  // 7. Timer and song pulses, including `every` applied to counted song events.
+  sweep({{"g", laneOf("l", driver("timer", 1, 0, 1.0), {binding("b1", 0, 10, 0, 0, 0)})}}, {}, 8,
+        [&](int tick) { return frameAt(tick * 0.5, 0.5, 0, 0, 1); });
+  sweep({{"g", laneOf("l", driver("song"), {binding("b1", 0, 10, 0, 0, 0)})}}, {}, 6,
+        [&](int tick) { return frameAt(tick * 0.5, 0.5, 0, 0, 11 + (tick / 2) * 11); });
+  sweep({{"g", laneOf("l", driver("song", 2), {binding("b1", 0, 10, 0, 0, 0)})}}, {}, 6,
+        [&](int tick) { return frameAt(tick * 0.5, 0.5, 0, 0, 11 + tick * 11); });
+
+  // 8. Continuous followers, each reading its own bands, with the envelope
+  //    acting as a rate limit in both directions.
+  for (const std::string& type : {"bass", "mid", "treble", "energy"}) {
+    sweep({{"g", laneOf("l", driver(type), {binding("b1", 0, 10, 0.1, 0.05, 0.1)})}}, {}, 8,
+          [&](int tick) {
+            nova::SignalFrame frame = frameAt(tick * 0.05, 0.05, 0, 0, 1);
+            const float level = tick < 4 ? 1.0f : 0.0f;
+            frame.spectrum[0] = level;
+            frame.spectrum[12] = level;
+            frame.spectrum[25] = level;
+            frame.energy = level;
+            return frame;
+          });
+  }
+
+  // 9. Seeded random: held between cadence events, glided when a transition is
+  //    set, and identical on every engine.
+  for (double transition : {0.0, 0.25}) {
+    sweep({{"g", laneOf("l", driver("random", 1, 0, 4, "beat", transition),
+                        {binding("b1", 0, 10, 0.05, 0, 0.6)})}},
+          {}, 8, [&](int tick) { return frameAt(tick * 0.05, 0.05, tick / 3, 0, 1); });
+  }
+
+  // 10. Several settings groups on one entry: lanes stack and keep independent
+  //     envelopes, while a colliding combine mode layers with the later group
+  //     winning.
+  {
+    nova::SettingsGroup base;
+    base.id = "base";
+    base.lanes = {laneOf("a", driver("beat"), {binding("b-a", 0, 4, 0, 1, 0)})};
+    base.combine["glow"] = nova::CombineMode::Add;
+    base.staticSettings["complexity"] = 0.4;
+    nova::SettingsGroup hard;
+    hard.id = "hard";
+    hard.lanes = {laneOf("b", driver("downbeat", 4), {binding("b-b", 0, 10, 0, 1, 0)})};
+    hard.combine["glow"] = nova::CombineMode::Strongest;
+    hard.staticSettings["complexity"] = 0.9;
+
+    const nova::MergedSettingsGroups merged = nova::mergeSettingsGroups({&base, &hard});
+    mix(static_cast<double>(merged.lanes.size()));
+    mix(merged.combine.at("glow") == nova::CombineMode::Strongest ? 1.0 : 0.0);
+    mix(merged.staticSettings.at("complexity"));
+    sweep(merged.lanes, merged.combine, 8,
+          [&](int tick) { return frameAt(tick, 0.05, tick, tick, 1); });
+
+    // Reversing the order must flip the scalars and nothing else.
+    const nova::MergedSettingsGroups reversed = nova::mergeSettingsGroups({&hard, &base});
+    mix(reversed.combine.at("glow") == nova::CombineMode::Strongest ? 1.0 : 0.0);
+    mix(reversed.staticSettings.at("complexity"));
+  }
+
+  // 11. Rarity ordering, which is what `strongest` resolves ties by.
+  {
+    const nova::SignalFrame frame = frameAt(0, 0.05, 0, 0, 1);
+    for (const nova::Driver& value :
+         {driver("beat"), driver("beat", 2), driver("downbeat"), driver("downbeat", 4),
+          driver("timer", 1, 0, 30), driver("bass"), driver("random")}) {
+      const double period = nova::driverPeriodSeconds(value, frame);
+      mix(std::isinf(period) ? -2.0 : period);
+    }
+    mix(nova::driverPeriodSeconds(driver("song"), frame) ==
+                std::numeric_limits<double>::infinity()
+            ? 1.0
+            : 0.0);
+  }
+
+  char buffer[96];
+  std::snprintf(buffer, sizeof(buffer), "[\"parameter-drivers:%d:%016llx\"]", samples,
                 static_cast<unsigned long long>(hash));
   return finishCase(std::move(result), directory, buffer, update);
 }
@@ -311,6 +808,22 @@ CaseResult runCase(const fs::path& directory, bool update) {
   if (caseValue->find("type") != nullptr &&
       caseValue->find("type")->stringOr("") == "glow-overlay") {
     return runGlowOverlayCase(directory, update, std::move(result), *caseValue);
+  }
+  if (caseValue->find("type") != nullptr &&
+      caseValue->find("type")->stringOr("") == "parameter-drivers") {
+    return runParameterDriversCase(directory, update, std::move(result), *caseValue);
+  }
+  if (caseValue->find("type") != nullptr &&
+      caseValue->find("type")->stringOr("") == "background-band") {
+    return runBackgroundBandCase(directory, update, std::move(result), *caseValue);
+  }
+  if (caseValue->find("type") != nullptr &&
+      caseValue->find("type")->stringOr("") == "scene-blend") {
+    return runSceneBlendCase(directory, update, std::move(result), *caseValue);
+  }
+  if (caseValue->find("type") != nullptr &&
+      caseValue->find("type")->stringOr("") == "centre-image") {
+    return runCentreImageCase(directory, update, std::move(result), *caseValue);
   }
 
   const std::string moduleName =

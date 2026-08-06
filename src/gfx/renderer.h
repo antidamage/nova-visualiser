@@ -76,9 +76,19 @@ class Renderer {
     // tvOS passes these two for the phonoscope surface specifically.
     float blobScale = 4.0f;
     float blobSoftness = 0.45f;
+    // Frame geometry, as fractions of the render view. The defaults are the
+    // original fixed letterbox: a centred band one third high and full width.
+    // Both are driven parameters, so they arrive resolved for this frame.
+    float heightFraction = 1.0f / 3.0f;
+    float widthFraction = 1.0f;
+    // Vignette. The colour is a palette slot; the other two are driven. The
+    // defaults reproduce the authored `PhonoscopeEdgeVignette` exactly.
+    float vignetteOpacity = 0.96f;
+    float vignetteSize = 1.0f;
     Vec4 background{0, 0, 0, 1};
     Vec4 accent{0, 0, 0, 1};
     Vec4 highlight{0, 0, 0, 1};
+    Vec4 vignette{0, 0, 0, 1};
   };
   void setFluidBackground(const FluidBackground& settings) { fluid_ = settings; }
 
@@ -129,6 +139,10 @@ class Renderer {
   void renderFluidBackground(double time);
   void updateMessageTexture(const std::string& message);
   void renderMessage(const SceneSnapshot& snapshot);
+  // Uploads `image` into `slot` if it is not already there, and reports whether
+  // there is anything to draw. Identity is the shared_ptr, never the pixels.
+  bool bindCentreImage(int slot, const std::shared_ptr<const DecodedImage>& image);
+  void renderCentreImage(const SceneSnapshot& snapshot);
 
   int width_ = 0;
   int height_ = 0;
@@ -144,6 +158,7 @@ class Renderer {
   uint32_t compositeProgram_ = 0;
   uint32_t fluidProgram_ = 0;
   uint32_t textProgram_ = 0;
+  uint32_t centreImageProgram_ = 0;
   uint32_t glowBlurProgram_ = 0;
   uint32_t glowOverlayProgram_ = 0;
   uint32_t p010Program_ = 0;
@@ -164,20 +179,32 @@ class Renderer {
   int compositeIntensity_ = -1;
   int compositeBackground_ = -1;
   int compositeUseFluid_ = -1;
+  int compositeBlendMode_ = -1;
   int downsampleTexel_ = -1;
   int upsampleTexel_ = -1;
   int upsampleRadius_ = -1;
   int textColor_ = -1;
   int textScale_ = -1;
   int textHasColor_ = -1;
+  int centreImageExtentTo_ = -1;
+  int centreImageExtentFrom_ = -1;
+  int centreImageFadeUniform_ = -1;
+  int centreImageHasFrom_ = -1;
   int glowBlurAxisTexel_ = -1;
   int glowBlurSigma_ = -1;
   int glowOverlayOpacity_ = -1;
+  int glowOverlayOverdrive_ = -1;
+  int glowOverlayClamped_ = -1;
   int glowOverlayBlendMode_ = -1;
   struct FluidUniforms {
     int bandResolution = -1;
     int bandFraction = -1;
+    int bandWidthFraction = -1;
+    int vignetteColor = -1;
+    int vignetteOpacity = -1;
+    int vignetteSize = -1;
     int time = -1;
+
     int background = -1;
     int accent = -1;
     int highlight = -1;
@@ -232,6 +259,15 @@ class Renderer {
   bool messageHasColor_ = false;
   TextRasterizer text_;
   std::string cachedMessage_;
+
+  // The centre image's two planes: [0] is the incoming image, [1] the one still
+  // fading out behind it. Allocated lazily and at the image's OWN size -- unlike
+  // the message textures, which are full-frame only because glyph rasterisation
+  // is. The cached pointers are what make "same image" a pointer comparison
+  // instead of a hash of several megabytes every frame.
+  static constexpr int kCentreImagePlanes = 2;
+  std::array<uint32_t, kCentreImagePlanes> centreImageTextures_{};
+  std::array<std::shared_ptr<const DecodedImage>, kCentreImagePlanes> cachedCentreImages_{};
 
   static constexpr int kBloomMips = 5;
   std::array<uint32_t, kBloomMips> bloomTextures_{};

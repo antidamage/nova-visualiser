@@ -1,0 +1,5 @@
+{
+  "type": "centre-image",
+  "note": "Formula test, not a render test. Locks how the centre slot fits and scales an image, which this engine does as a uniform handed to src/shaders/centre_image.frag and tvOS does with .scaledToFit() plus .scaleEffect() in PhonoscopeView. Covers the contain-fit on both sides of the frame's own aspect (a tall crest, a square, a banner wider than the frame), both ends of the shared __messageScale clamp plus values outside it, and the cross-fade ramp including a zero-length transition. The grid is defined in runCentreImageCase() and mirrored by ParitySelfTests.testCentreImageParity(); changing either means changing both and re-recording expected.json.",
+  "invariant": "The fade is a LINEAR ramp, not the exponential chase the palette uses: it has to reach 1 so the outgoing image can be released. At scale 1 the image fills kCentreImageBaseFill (a third) of its constraining axis, keeping the source's proportions exactly -- a centre image is a centrepiece, not a backdrop."
+}
