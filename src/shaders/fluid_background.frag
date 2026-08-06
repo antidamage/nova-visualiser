@@ -23,9 +23,20 @@
 in vec2 uv;
 layout(location = 0) out vec4 outColor;
 
-// Band geometry, in full-frame terms.
-uniform vec2 bandResolution;  // pixel size of the band itself, not the frame
-uniform float bandFraction;   // band height as a fraction of the frame
+// Band geometry, in full-frame terms. Both fractions are driven parameters
+// (`__bgHeight` / `__bgWidth`), so the band is no longer the fixed one-third
+// letterbox it was authored as -- it can be anything from nothing to the whole
+// frame, and a driver lane can sweep it on the beat.
+uniform vec2 bandResolution;       // pixel size of the band itself, not the frame
+uniform float bandFraction;        // band height as a fraction of the frame
+uniform float bandWidthFraction;   // band width as a fraction of the frame
+
+// The frame vignette. Colour comes from the theme's `vignette` palette slot, so
+// the bars around the band and the gradient inside it are the same colour and
+// read as one continuous frame rather than a band sitting on a black mat.
+uniform vec3 vignetteColor;
+uniform float vignetteOpacity;  // peak coverage of the edge gradients
+uniform float vignetteSize;     // multiplies the authored gradient extents
 
 uniform float time;
 uniform vec3 background;
@@ -72,8 +83,13 @@ float peakField(vec2 p, vec2 center, float radius, float seed, float warp, float
 }
 
 // One SwiftUI LinearGradient stop pair, as coverage. Each of the four vignette
-// gradients runs from black at 0.96 alpha to fully clear over a fixed fraction.
-float edge(float t, float extent) { return 0.96 * clamp(1.0 - t / extent, 0.0, 1.0); }
+// gradients runs from `vignetteOpacity` coverage at the edge to fully clear over
+// `extent` of the band. The authored extents (0.18 across, 0.28 down) are
+// multiplied by `vignetteSize`, which keeps their ratio -- the frame stays
+// wider top-and-bottom than side-to-side as it grows, as it was drawn.
+float edge(float t, float extent) {
+  return vignetteOpacity * clamp(1.0 - t / max(0.0001, extent * vignetteSize), 0.0, 1.0);
+}
 
 void main() {
   // GL's framebuffer origin is bottom-left and SwiftUI's is top-left. Flip here
@@ -81,24 +97,33 @@ void main() {
   // frame for frame when the two are compared side by side.
   vec2 frameUv = vec2(uv.x, 1.0 - uv.y);
 
-  // Band-local coordinates. The band is centred vertically and full width.
+  // Band-local coordinates. The band is centred on both axes.
   float bandTop = 0.5 - bandFraction * 0.5;
+  float bandLeft = 0.5 - bandWidthFraction * 0.5;
   float bandLocalY = (frameUv.y - bandTop) / max(0.0001, bandFraction);
+  float bandLocalX = (frameUv.x - bandLeft) / max(0.0001, bandWidthFraction);
 
   // The band edge is a hard clip on tvOS (a SwiftUI frame). Soften it by about
   // one pixel: at 4K a hard cut here shimmers under the encoder.
-  float edgeSoftness = 1.0 / max(1.0, bandResolution.y);
-  float inBand = smoothstep(-edgeSoftness, edgeSoftness, bandLocalY) *
-                 smoothstep(-edgeSoftness, edgeSoftness, 1.0 - bandLocalY);
+  vec2 edgeSoftness = 1.0 / max(vec2(1.0), bandResolution);
+  float inBand = smoothstep(-edgeSoftness.y, edgeSoftness.y, bandLocalY) *
+                 smoothstep(-edgeSoftness.y, edgeSoftness.y, 1.0 - bandLocalY) *
+                 smoothstep(-edgeSoftness.x, edgeSoftness.x, bandLocalX) *
+                 smoothstep(-edgeSoftness.x, edgeSoftness.x, 1.0 - bandLocalX);
   if (inBand <= 0.0) {
-    outColor = vec4(0.0, 0.0, 0.0, 0.0);
+    // Outside the band is the vignette colour at full coverage, not a hole. The
+    // bars and the gradient inside the band are then the same surface, and the
+    // composite has a defined backdrop everywhere -- which is what lets the
+    // scene blend modes mean something across the whole frame. Premultiplied,
+    // so the colour is already the output.
+    outColor = vec4(vignetteColor, 1.0);
     return;
   }
 
   // The field is computed in the band's own aspect, because that is the
   // drawable tvOS hands the shader.
   float aspect = max(0.0001, bandResolution.x / max(1.0, bandResolution.y));
-  vec2 bandUv = vec2(frameUv.x, clamp(bandLocalY, 0.0, 1.0));
+  vec2 bandUv = vec2(clamp(bandLocalX, 0.0, 1.0), clamp(bandLocalY, 0.0, 1.0));
   vec2 p = (bandUv - 0.5) * vec2(aspect, 1.0);
 
   float intensity = clamp(peakIntensity, 0.4, 2.6);
@@ -146,17 +171,21 @@ void main() {
   color = min(color, cap);
   color = clamp(color, 0.0, 1.0);
 
-  // PhonoscopeEdgeVignette: four black gradients in BAND-local space (the 0.28
-  // stop is 28% of the band, not of the screen). SwiftUI's ZStack composites
-  // them source-over, so they combine as 1 - prod(1 - a), not as a sum.
+  // PhonoscopeEdgeVignette: four gradients in BAND-local space (the 0.28 stop is
+  // 28% of the band, not of the screen). SwiftUI's ZStack composites them
+  // source-over, so they combine as 1 - prod(1 - a), not as a sum.
   float left = edge(bandUv.x, 0.18);
   float right = edge(1.0 - bandUv.x, 0.18);
   float top = edge(bandLocalY, 0.28);
   float bottom = edge(1.0 - bandLocalY, 0.28);
   float shade = 1.0 - (1.0 - left) * (1.0 - right) * (1.0 - top) * (1.0 - bottom);
-  color *= (1.0 - shade);
+  // Toward the vignette colour rather than a plain darken, so the gradient meets
+  // the bars outside the band seamlessly. With the default black slot this is
+  // exactly the original `color *= (1.0 - shade)`.
+  color = mix(color, vignetteColor, shade);
 
-  // Alpha is coverage for the composite: the band hides the flat background
-  // behind it, everything outside the band does not.
-  outColor = vec4(color * inBand, inBand);
+  // The band is opaque and so are the bars around it, so coverage is 1 across
+  // the frame; `inBand` only survives as the one-pixel soft edge.
+  vec3 framed = mix(vignetteColor, color, inBand);
+  outColor = vec4(framed, 1.0);
 }

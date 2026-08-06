@@ -58,6 +58,31 @@ inline GlowBlendMode glowBlendModeFor(float blendValue) {
   return static_cast<GlowBlendMode>(static_cast<int>(std::floor(clamped + 0.5f)));
 }
 
+// How the scene layer meets the backdrop, as a driven parameter on the same
+// kind of whole-numbered axis as `__glowBlend`. This is a separate axis from
+// the glow's, so the numbering is free rather than inherited -- but it is still
+// append-only for the same reason: a stored driver range is a pair of numbers
+// on it.
+//
+// `Linear` is the original source-over term and therefore the default, so an
+// undriven picture is composited exactly as it always was. The other three are
+// only definable at the composite: the particle pass renders to its own target
+// with no backdrop to blend against, so multiply and overlay have nothing to
+// operate on until the two layers meet.
+//
+// The mode applies to the whole scene layer -- dots, trails, wires and bloom
+// together -- against the backdrop. It is not a blend between individual
+// particles, which accumulate additively among themselves as they always have.
+enum class SceneBlendMode { Linear = 0, Screen = 1, Overlay = 2, Multiply = 3 };
+
+inline constexpr int kSceneBlendModeCount = 4;
+
+inline SceneBlendMode sceneBlendModeFor(float blendValue) {
+  const float clamped =
+      std::max(0.0f, std::min(static_cast<float>(kSceneBlendModeCount - 1), blendValue));
+  return static_cast<SceneBlendMode>(static_cast<int>(std::floor(clamped + 0.5f)));
+}
+
 struct EffectDimensions {
   float scale = 1;
   float dotCore = 0;

@@ -49,18 +49,31 @@ struct GlowOverlayInput {
   Vec4 glow;
   // 0-1. The dashboard authors 0-100 and divides.
   float opacity = 0;
+  // 1-10. Multiplies the blurred copy's RGB, so raising it makes the glow
+  // stronger rather than merely mixing more of it in.
+  float overdrive = 1;
+  // Clamped (the default) the overdriven glow saturates. Unclamped it keeps
+  // its overdriven RGB past 1, so the blend drives the picture to white.
+  bool clamped = true;
   GlowBlendMode mode = GlowBlendMode::Screen;
 };
 
 inline Vec4 glowOverlayReference(const GlowOverlayInput& in) {
   const float opacity = clampValue(in.opacity, 0.0f, 1.0f);
-  // The glow is clamped because the composite target is HDR: an unclamped
-  // highlight put through `screen` saturates the whole frame to white, and put
-  // through `multiply` is not a darkening at all. Blend modes are defined on
-  // display-referred colour, so this pass works there.
-  const float glowR = clampValue(in.glow.x, 0.0f, 1.0f);
-  const float glowG = clampValue(in.glow.y, 0.0f, 1.0f);
-  const float glowB = clampValue(in.glow.z, 0.0f, 1.0f);
+  // Blend modes are defined on display-referred colour, and the composite
+  // target is HDR, so by default the glow is brought back into 0-1 before the
+  // blend. Switching that off is a deliberate look: `screen` then runs away to
+  // white, which is exactly what unclamped overdrive is for.
+  const float overdrive = clampValue(in.overdrive, 1.0f, 10.0f);
+  // Negative light is never meaningful, so the floor holds either way; only the
+  // ceiling is what `clamped` decides.
+  const auto drive = [&](float value) {
+    const float driven = std::max(0.0f, value * overdrive);
+    return in.clamped ? std::min(driven, 1.0f) : driven;
+  };
+  const float glowR = drive(in.glow.x);
+  const float glowG = drive(in.glow.y);
+  const float glowB = drive(in.glow.z);
   const float baseR = std::max(0.0f, in.base.x);
   const float baseG = std::max(0.0f, in.base.y);
   const float baseB = std::max(0.0f, in.base.z);

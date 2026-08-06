@@ -13,6 +13,10 @@
 layout(binding = 0) uniform sampler2D base;
 layout(binding = 1) uniform sampler2D glow;
 uniform float opacity;
+// 1-10. Multiplies the glow's RGB.
+uniform float overdrive;
+// 1 clamps the overdriven glow to 0-1; 0 lets it run past 1 towards white.
+uniform int glowClamped;
 // The `__glowBlend` axis itself: 0 screen, 1 multiply, 2 overlay.
 uniform int blendMode;
 in vec2 uv;
@@ -20,10 +24,12 @@ layout(location = 0) out vec4 outColor;
 
 void main() {
   vec4 baseColor = texture(base, uv);
-  // Blend modes are defined on display-referred colour. The composite target is
-  // HDR, so an unclamped highlight would saturate `screen` to white across the
-  // whole frame and stop `multiply` from darkening anything.
-  vec3 glowColor = clamp(texture(glow, uv).rgb, 0.0, 1.0);
+  // Blend modes are defined on display-referred colour and the composite target
+  // is HDR, so the glow is normally brought back into 0-1 first.
+  // Overdrive multiplies the glow's RGB. Clamped, that saturates it; unclamped
+  // the excess carries into the blend and blows the picture out to white.
+  vec3 driven = max(texture(glow, uv).rgb * clamp(overdrive, 1.0, 10.0), vec3(0.0));
+  vec3 glowColor = glowClamped != 0 ? min(driven, vec3(1.0)) : driven;
   vec3 baseRgb = max(baseColor.rgb, vec3(0.0));
   float amount = clamp(opacity, 0.0, 1.0);
 

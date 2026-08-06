@@ -62,9 +62,9 @@ class Engine {
   void renderLoop();
   void watcherLoop();
   void publishSimulationInput();
-  void applyThemeParameterOverrides(const net::ConfigSnapshot& snapshot, const SignalFrame& frame,
-                                    std::unordered_map<std::string, double>& settings,
-                                    std::unordered_set<std::string>& driven);
+  void applyControlLanes(const net::ConfigSnapshot& snapshot, const SignalFrame& frame,
+                         std::unordered_map<std::string, double>& settings,
+                         std::unordered_set<std::string>& driven);
   double renderAheadSeconds() const;
   void requestKeyframe();
   int publishDivisor() const;
@@ -91,6 +91,14 @@ class Engine {
   std::atomic<float> fluidSpeedForStatus_{0.0f};
   // True while nothing is playing. Drives the reduced idle encode cadence.
   std::atomic<double> fluidPhaseForStatus_{0.0};
+  // The centre slot, published for /status. Whether an image actually loaded is
+  // otherwise unfalsifiable from outside: a missing one and a decode that
+  // failed both look like an empty centre, and the only other way to tell them
+  // apart is to eyeball the picture. Same rationale as `fluidPhase`.
+  std::atomic<int> centreImageWidthForStatus_{0};
+  std::atomic<int> centreImageHeightForStatus_{0};
+  std::atomic<float> centreImageFadeForStatus_{1.0f};
+  std::atomic<bool> centreMessageForStatus_{false};
   std::atomic<bool> idlePlayback_{false};
   // Set when an IDR has been asked for, so the idle cadence cannot skip it.
   std::atomic<bool> keyframeWanted_{false};
@@ -148,18 +156,16 @@ class Engine {
   std::atomic<int> fullRateExitReason_{0};  // 0 none, 1 expired, 2 fps, 3 encode
   std::atomic<double> fullRatePressureSince_{0};
 
-  // Local palette cursor resolving Nova's authoritative selected theme id.
-  size_t themeIndex_ = 0;
+  // Local palette cursor resolving Nova's authoritative selected entry. The
+  // rotation walks entries, not themes: one theme can appear several times with
+  // different settings groups, so a theme id cannot address a position in it.
+  size_t entryIndex_ = 0;
+  std::string currentEntryId_;
   std::string currentThemeId_;
 
-  struct ParameterDriverState {
-    double current = 0;
-    double target = 0;
-    std::string eventKey;
-    double holdUntil = 0;
-    bool wasAttacking = false;
-  };
-  std::unordered_map<std::string, ParameterDriverState> parameterDriverStates_;
+  // Per driver-slot envelope state, owned here and threaded through the shared
+  // evaluator in core/parameter_drivers.h.
+  DriverStates parameterDriverStates_;
 
   // Resolved signal frames arrive directly from the original Apple TV engine.
   // A short stale timeout keeps the renderer self-contained if that uplink

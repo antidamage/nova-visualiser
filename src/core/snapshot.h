@@ -14,6 +14,7 @@
 #include <vector>
 
 #include "core/effect_scale.h"
+#include "core/image.h"
 #include "core/signal.h"
 #include "core/vec.h"
 
@@ -52,7 +53,34 @@ struct SceneSnapshot {
   Vec4 fluidAccent{0.45f, 0.45f, 0.45f, 1};
   Vec4 fluidHighlight{0.85f, 0.85f, 0.85f, 1};
   float fluidSpeed = 1.0f;
+  // Frame geometry and vignette. All driven except the colour, which is the
+  // theme's `vignette` palette slot. The defaults are the original fixed
+  // letterbox: a centred band one third high, full width, framed by the
+  // authored black edge gradients.
+  float backgroundHeight = 1.0f / 3.0f;
+  float backgroundWidth = 1.0f;
+  Vec4 vignetteColor{0, 0, 0, 1};
+  float vignetteOpacity = 0.96f;
+  float vignetteSize = 1.0f;
+  // How the scene layer meets the backdrop, already snapped off the driven
+  // `__sceneBlend` axis by `sceneBlendModeFor`. Linear is the original term.
+  SceneBlendMode sceneBlendMode = SceneBlendMode::Linear;
+  // The centre slot. Exactly one of `message` and `centreImage` is ever
+  // non-empty in a given frame -- which of them is `Simulation::submit`'s
+  // decision, not the renderer's.
   std::string message;
+  // The incoming centre image, and the one still fading out behind it during a
+  // colour-theme change. Shared pointers rather than pixels: the snapshot is
+  // copied every tick, and the renderer's "is this the same image?" check is a
+  // pointer comparison rather than a hash of several megabytes.
+  std::shared_ptr<const DecodedImage> centreImage;
+  std::shared_ptr<const DecodedImage> centreImageFrom;
+  // The incoming image's weight, 0 to 1. 1 whenever nothing is cross-fading.
+  float centreImageFade = 1.0f;
+  // How tall the centre image is drawn, as a fraction of the frame. Width
+  // follows from the source's proportions, so the picture is never distorted.
+  float centreImageHeight = 0.33f;
+  // Shared by both: the slot is scaled, not whatever happens to be in it.
   float messageScale = 1.0f;
   Vec4 messageColor{1, 1, 1, 1};
   // Final glow-overlay pass, applied over the whole picture including the
@@ -60,6 +88,10 @@ struct SceneSnapshot {
   // parameters, so they arrive already resolved for this frame.
   float glowBlurAmount = 0.0f;
   float glowOpacity = 0.0f;
+  // 1-10, multiplied into the blurred copy.
+  float glowOverdrive = 1.0f;
+  // Whether the overdriven glow is brought back into 0-1 before the blend.
+  bool glowClamped = true;
   // Photoshop's "screen", "multiply" or "overlay", already snapped off the
   // driven `__glowBlend` axis by `glowBlendModeFor`.
   GlowBlendMode glowBlendMode = GlowBlendMode::Screen;

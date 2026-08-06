@@ -31,7 +31,10 @@ class HousePartyProducer {
 
   // Called from the engine each tick with the live signal and palette. Cheap:
   // it only stores values, the network loop runs on its own thread.
-  void update(const SignalFrame& signal, const Palette& palette);
+  // `hueOffsetDegrees` is the resolved `__hueOffset` effect. It is resolved
+  // here rather than by the dashboard because only this engine holds the
+  // spectrum a bass or energy driver reads.
+  void update(const SignalFrame& signal, const Palette& palette, double hueOffsetDegrees);
 
   void setEnabled(bool enabled);
   bool enabled() const { return enabled_.load(std::memory_order_relaxed); }
@@ -52,6 +55,8 @@ class HousePartyProducer {
   std::mutex mutex_;
   SignalFrame signal_;
   Palette palette_;
+  // The resolved `__hueOffset` effect, sampled with the signal it belongs to.
+  double hueOffsetDegrees_ = 0;
   std::string sessionId_;
   int sequence_ = 0;
   double smoothedLocalBrightness_ = 50;

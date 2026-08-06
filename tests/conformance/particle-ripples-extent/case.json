@@ -1,0 +1,15 @@
+{
+  "module": "../particle-ripples/module.json",
+  "bpm": 128,
+  "energy": 0.72,
+  "trackSeed": 20260803,
+  "sampleTicks": [1, 30, 120, 360, 720],
+  "note": "Locks the gated grid extent. Same module and signal as `particle-ripples`, but the lattice is driven to full height and 60% width instead of the authored one-third band. The gap is set by complexity alone, so this must come out as more rows at the SAME spacing -- if a future change stretches the field to fit instead of adding rows, the particle counts in expected.json move and this fails. Both counts are also parity-checked by ParitySelfTests.testGridExtentParity().",
+  "settings": {
+    "complexity": 0.6, "intensity": 1.0, "fluid_speed": 0.65, "offset_magnifier": 13,
+    "strong_beat_multiplier": 1.65, "peak_threshold": 0.28, "peak_glow": 6.5,
+    "anticipation": 0.5, "ramp_up": 0.04, "release": 0.7, "flash_power": 3.8,
+    "trail_length": 7, "grid_wireframe": 1,
+    "grid_width": 0.6, "grid_height": 1.0
+  }
+}

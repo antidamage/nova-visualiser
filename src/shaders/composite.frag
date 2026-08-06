@@ -14,6 +14,10 @@ layout(binding = 2) uniform sampler2D backgroundField;
 uniform int useFluid;
 uniform float intensity;
 uniform vec4 background;
+// How the scene layer meets the backdrop: 0 linear, 1 screen, 2 overlay,
+// 3 multiply, already snapped off the driven `__sceneBlend` axis by
+// `sceneBlendModeFor`. Mirrors core/composite_reference.h exactly.
+uniform int sceneBlendMode;
 in vec2 uv;
 layout(location = 0) out vec4 outColor;
 
@@ -42,8 +46,58 @@ void main() {
     backdropColor = background.rgb * backdropAlpha;
   }
 
+  // `backdropColor` is premultiplied, so its own coverage is already in it --
+  // unlike core/composite_reference.h, which carries the backdrop straight and
+  // folds `backdropAlpha` into `reveal` instead. Same result, stated in the
+  // terms each side actually holds.
   float reveal = 1.0 - foregroundAlpha;
-  vec3 color = foreground + backdropColor * reveal;
-  float alpha = foregroundAlpha + backdropAlpha * reveal;
-  outColor = vec4(max(color, vec3(0.0)), clamp(alpha, 0.0, 1.0));
+  vec3 sourceOver = foreground + backdropColor * reveal;
+  float alpha = clamp(foregroundAlpha + backdropAlpha * reveal, 0.0, 1.0);
+
+  if (sceneBlendMode == 0) {
+    outColor = vec4(max(sourceOver, vec3(0.0)), alpha);
+    return;
+  }
+
+  // Display-referred blends, so both sides come into 0-1 first: the scene target
+  // is HDR and an unclamped multiply of two >1 values is not a multiply of
+  // anything meaningful.
+  //
+  // BOTH sides enter un-premultiplied by their own coverage -- multiplying by a
+  // partly-covered layer would otherwise read as multiplying by black. The
+  // backdrop always had this; the scene did not, which is why a lattice covering
+  // a fraction of the frame behaved like an opaque black plate under multiply
+  // and overlay. Bloom is excluded from the blended base because it carries no
+  // coverage and so has no un-premultiplied form; it is additive light and is
+  // added back after the blend. Mirrors core/composite_reference.h exactly.
+  vec3 straightBackdrop = backdropAlpha > 0.0 ? backdropColor / backdropAlpha : vec3(0.0);
+  vec3 s = clamp(base.rgb * (foregroundAlpha > 0.0 ? 1.0 / foregroundAlpha : 0.0), 0.0, 1.0);
+  vec3 b = clamp(straightBackdrop, 0.0, 1.0);
+
+  vec3 blended = s;
+  if (sceneBlendMode == 1) {
+    blended = s + b - s * b;
+  } else if (sceneBlendMode == 3) {
+    blended = s * b;
+  } else {
+    // Photoshop overlay, with the BACKDROP choosing the branch: the backdrop is
+    // the base layer here and the scene is what is laid over it.
+    vec3 low = 2.0 * s * b;
+    vec3 high = 1.0 - 2.0 * (1.0 - s) * (1.0 - b);
+    blended = mix(low, high, step(vec3(0.5), b));
+  }
+
+  // The scene's own alpha is the mask. Where it does not cover, the backdrop
+  // passes through untouched; where it covers fully, the mode applies at full
+  // strength. This is the step that makes the particle layer an alpha mask
+  // rather than a black plate.
+  vec3 overBackdrop = mix(b, blended, foregroundAlpha) * alpha;
+  // Where the backdrop does not cover, there is nothing to blend with, so the
+  // result falls back to plain source-over. This keeps the non-fluid path -- a
+  // flat palette colour that may be fully transparent -- from collapsing to
+  // black under multiply. `sourceOver` carries no glow here, so adding it once
+  // below cannot double it.
+  vec3 sourceOverBase = base.rgb + backdropColor * reveal;
+  vec3 color = mix(sourceOverBase, overBackdrop, backdropAlpha) + glow.rgb;
+  outColor = vec4(max(color, vec3(0.0)), alpha);
 }

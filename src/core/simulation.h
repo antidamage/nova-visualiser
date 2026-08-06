@@ -24,6 +24,7 @@
 #include <vector>
 
 #include "core/expression.h"
+#include "core/image.h"
 #include "core/module.h"
 #include "core/palette.h"
 #include "core/signal.h"
@@ -41,12 +42,32 @@ struct SimulationInput {
   std::unordered_set<std::string> driverInterpolatedSettings;
   Palette palette;
   std::string message;
+  // The live colour theme's centre image, already decoded. A non-blank message
+  // wins over it; that is `Simulation::submit`'s decision.
+  std::shared_ptr<const DecodedImage> themeImage;
+  // The centre slot's two size axes. `centreHeight` is how tall the image is as
+  // a percentage of the frame; `messageScale` is the driven multiplier on top,
+  // shared with the message.
+  double centreHeight = 33.0;
   double messageScale = 1.0;
   // Final glow overlay. Blur amount 0-20 and opacity 0-100 as authored; the
   // blend mode is Photoshop's, "screen", "multiply" or "overlay".
   double glowBlurAmount = 0.0;
   double glowOpacity = 0.0;
+  double glowOverdrive = 1.0;
+  bool glowClamped = true;
   GlowBlendMode glowBlendMode = GlowBlendMode::Screen;
+  // Frame geometry and vignette. Driven, so they arrive already resolved for
+  // this frame. The first three are PERCENTAGES of the render view, as authored
+  // -- `Simulation::submit` is where they become fractions, and everything
+  // downstream of it is in unit space. The defaults are the original fixed
+  // letterbox and its authored edge gradients. Vignette size stays a plain
+  // multiplier: it is allowed past 1, which is how it closes the band to a slit.
+  double backgroundHeight = 33.0;
+  double backgroundWidth = 100.0;
+  double vignetteOpacity = 96.0;
+  double vignetteSize = 1.0;
+  SceneBlendMode sceneBlendMode = SceneBlendMode::Linear;
   double transitionDuration = 0.6;
   bool transitionPaused = false;
   int reloadGeneration = 0;
@@ -121,8 +142,46 @@ class Simulation {
     std::string lineEndSlot = "lineSecondary";
     FieldWaveSource radialBeatWave;
 
+    // Extent gating. A field that declares `extentX`/`extentY` is allocated at
+    // its full 100% size and then gated down to a centred sub-rectangle every
+    // tick, because extent is a driven parameter and a driven parameter must
+    // never trigger a structural rebuild. Fields that declare neither leave
+    // these at the allocated size, which is the same thing as no gating.
+    bool gated = false;
+    json::Value extentX;
+    json::Value extentY;
+    int liveColumns = 1;
+    int liveRows = 1;
+    // Index of the first live column/row inside the allocated grid. Always
+    // `(allocated - live) / 2` exactly: `live` is snapped to the allocated
+    // count's parity so the sub-rectangle is centred on a whole cell rather
+    // than sliding half a gap as the extent sweeps.
+    int columnBegin = 0;
+    int rowBegin = 0;
+
     size_t count() const { return end - begin; }
     bool contains(size_t index) const { return index >= begin && index < end; }
+
+    // Whether an allocated cell is inside the live sub-rectangle. Dead cells are
+    // not integrated, receive no effects and emit no particles, so the running
+    // cost tracks the live extent even though the allocation is worst-case.
+    bool cellIsLive(int x, int y) const {
+      if (!gated) return true;
+      return x >= columnBegin && x < columnBegin + liveColumns && y >= rowBegin &&
+             y < rowBegin + liveRows;
+    }
+    bool indexIsLive(size_t index) const {
+      if (!gated) return true;
+      const int local = static_cast<int>(index - begin);
+      const int x = local % columns;
+      const int y = (local / columns) % rows;
+      return cellIsLive(x, y);
+    }
+    size_t liveCount() const {
+      return gated ? static_cast<size_t>(liveColumns) * static_cast<size_t>(liveRows) *
+                         static_cast<size_t>(depth)
+                   : count();
+    }
   };
 
   struct FieldWave {
@@ -181,6 +240,12 @@ class Simulation {
   ExpressionInputs expressionInputs(double random) const;
   FieldWaveSource radialBeatWave(const json::Value& scene) const;
   void advanceConfiguration(double delta);
+  // Resolves each gated field's live sub-rectangle from the current settings.
+  // Runs every tick, before anything reads the field, because extent is driven.
+  void applyFieldExtents();
+  bool entityLive(size_t index) const {
+    return index >= entityLive_.size() || entityLive_[index] != 0;
+  }
   void emitBeatParticles();
   void enqueueRootEffects();
   void advanceFieldWaves(float dt);
@@ -203,10 +268,27 @@ class Simulation {
   std::shared_ptr<const Module> module_;
   SignalFrame signal_ = SignalFrame::idle();
   std::string message_;
+  // The centre slot. `centreImage_` is what should be on screen now and
+  // `centreImagePrev_` what is fading out behind it; `centreImageFade_` is the
+  // incoming one's weight, ramped linearly over the rotation's transition. A
+  // finished fade releases the outgoing image, which is why this is a ramp and
+  // not the exponential chase the palette uses -- a chase never arrives.
+  std::shared_ptr<const DecodedImage> centreImage_;
+  std::shared_ptr<const DecodedImage> centreImagePrev_;
+  double centreImageFade_ = 1.0;
+  double centreImageFadeSeconds_ = 0.0;
+  double centreHeight_ = 0.33;
   double messageScale_ = 1.0;
   double glowBlurAmount_ = 0.0;
   double glowOpacity_ = 0.0;
+  double glowOverdrive_ = 1.0;
+  bool glowClamped_ = true;
   GlowBlendMode glowBlendMode_ = GlowBlendMode::Screen;
+  double backgroundHeight_ = 1.0 / 3.0;
+  double backgroundWidth_ = 1.0;
+  double vignetteOpacity_ = 0.96;
+  double vignetteSize_ = 1.0;
+  SceneBlendMode sceneBlendMode_ = SceneBlendMode::Linear;
   std::unordered_map<std::string, double> settings_;
   std::unordered_map<std::string, double> targetSettings_;
   std::unordered_set<std::string> driverInterpolatedSettings_;
@@ -218,6 +300,12 @@ class Simulation {
   std::string moduleKey_;
 
   std::vector<Entity> entities_;
+  // Parallel to `entities_`: 1 while the entity is inside its field's live
+  // extent. Recomputed by `applyFieldExtents` rather than derived per read,
+  // because integrate, effect propagation and publish all consult it per entity
+  // per tick. Entities outside any gated field -- beat-emitted particles, every
+  // ungated module -- are permanently 1.
+  std::vector<uint8_t> entityLive_;
   std::vector<FieldRange> fields_;
   std::vector<FieldWave> fieldWaves_;
   std::vector<uint64_t> visitedTokens_;

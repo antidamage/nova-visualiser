@@ -17,8 +17,10 @@
 #include <unordered_map>
 #include <vector>
 
+#include "core/image.h"
 #include "core/module.h"
 #include "core/palette.h"
+#include "core/parameter_drivers.h"
 #include "core/signal.h"
 #include "core/simulation.h"
 #include "net/sse_client.h"
@@ -62,52 +64,49 @@ struct FluidThemeSettings {
 // degenerate one (every foreground slot at intensity 0, say) the result is bare
 // geometry on a flat background that looks nothing like the television.
 struct ColorGroupRotation {
-  struct ParameterSource {
-    std::string type;
-    std::optional<double> value;
-    std::optional<double> min;
-    std::optional<double> max;
-    std::string cadence;
-    double intervalSeconds = 4;
-    double transitionSeconds = 0.5;
-    double attackSeconds = 0.05;
-    double holdSeconds = 0;
-    double releaseSeconds = 0.6;
+  // One stop on the playlist. A colour theme may appear in several entries with
+  // different settings groups, which is why an entry carries its own id: the
+  // theme id is no longer unique within a group and cannot key the rotation.
+  struct Entry {
+    std::string id;
+    std::string themeId;
+    // Applied in order: their lanes stack, their scalars layer.
+    std::vector<std::string> settingsGroupIds;
   };
-  // "interval" advances on a timer, "downbeat" on each bar, anything else holds.
-  std::string changeMode;
-  // "shuffle" picks a random other theme; anything else advances in order.
-  std::string order;
-  double waitSeconds = 12;
-  double transitionSeconds = 1.5;
-  // Fully resolved palettes, in group order: module slot defaults with the
-  // theme's own colours applied over them.
+  // Fully resolved palettes, parallel to `entries`: module slot defaults with
+  // the entry's theme colours applied over them.
   std::vector<Palette> palettes;
-  std::vector<std::string> themeIds;
+  // The entry's theme's centre image, parallel to `entries` and null where the
+  // theme supplies none. Decoded once and shared, so moving between two entries
+  // that name the same image is a pointer comparison and no re-upload.
+  std::vector<std::shared_ptr<const DecodedImage>> images;
+  std::vector<Entry> entries;
   std::string groupId;
-  // The configuration editor publishes its currently selected preview theme.
-  // tvOS pins to it; the streamed renderer must not keep rotating underneath.
-  std::string pinnedThemeId;
+  // The configuration editor publishes the entry it is previewing. tvOS pins to
+  // it; the streamed renderer must not keep rotating underneath.
+  std::string pinnedEntryId;
   // Runtime selection is owned by Nova. Iridium and every display consume the
-  // same id/revision instead of running separate interval/downbeat clocks.
+  // same ids/revision instead of running separate rotation clocks. The theme
+  // and settings ids arrive together so colour and behaviour never tear.
+  std::string selectedEntryId;
   std::string selectedThemeId;
   std::string selectedGroupId;
+  std::vector<std::string> selectedSettingsGroupIds;
   std::optional<double> selectedTransitionSeconds;
   bool paused = false;
   uint64_t revision = 0;
-  // Per-theme setting drivers. The local Metal engine applies these after the
-  // module's baseline settings; Iridium must do the same or the selected theme
-  // loses its flashes, trails and audio-reactive motion.
-  std::vector<std::unordered_map<std::string, ParameterSource>> parameterOverrides;
 };
-
-using PhonoscopeParameterSource = ColorGroupRotation::ParameterSource;
 
 struct ConfigSnapshot {
   std::shared_ptr<const Module> module;
   std::unordered_map<std::string, double> settings;
   std::unordered_set<std::string> driverInterpolatedSettings;
-  std::unordered_map<std::string, PhonoscopeParameterSource> parameterSources;
+  // Named sets of driver lanes. Which of them apply is decided by the selected
+  // entry, so the whole library travels in the snapshot.
+  std::vector<SettingsGroup> settingsGroups;
+  // The centre of the picture when it is text. A non-blank message overrides
+  // whatever image the live colour theme supplies; the image half never comes
+  // from here, only from a theme.
   std::string message;
   Palette palette;
   ColorGroupRotation rotation;
@@ -137,7 +136,15 @@ class ConfigClient {
   TrackAnalysis analysis() const;
 
   bool streamConnected() const { return sse_.connected(); }
-  const std::string& lastError() const { return lastError_; }
+  std::string lastError() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return lastError_;
+  }
+  // How many times the configuration has actually been re-read and committed.
+  // Exposed because a config that silently stops refreshing is otherwise
+  // indistinguishable from one nobody has changed -- the same reason
+  // `fluidPhase` is published.
+  uint64_t revision() const { return revision_.load(std::memory_order_relaxed); }
 
   // Forces an immediate refresh, e.g. after a command that changes config.
   void poke();
@@ -145,6 +152,9 @@ class ConfigClient {
  private:
   void run(double pollSeconds);
   bool refreshConfiguration();
+  // Fetches and decodes a centre image, or returns the cached one. Runs on the
+  // config thread; the render thread only ever receives a finished shared_ptr.
+  std::shared_ptr<const DecodedImage> centreImage(const std::string& url);
   void refreshTheme();
   void refreshThemeState();
   void refreshNowPlaying();
@@ -156,6 +166,7 @@ class ConfigClient {
   std::thread thread_;
   std::atomic<bool> running_{false};
   std::atomic<bool> pending_{true};
+  std::atomic<uint64_t> revision_{0};
   SseClient sse_;
 
   mutable std::mutex mutex_;
@@ -163,6 +174,10 @@ class ConfigClient {
   NowPlaying nowPlaying_;
   TrackAnalysis analysis_;
   std::string configEtag_;
+  // Decoded centre images, keyed by the URL they came from. Every URL carries
+  // `?v=<updatedAt>`, so a re-upload is a new key rather than a stale hit, and
+  // an entry survives only while something still references it.
+  std::unordered_map<std::string, std::shared_ptr<const DecodedImage>> imageCache_;
   std::string themeEtag_;
   FluidThemeSettings fluidTheme_;
   double lastThemeFetch_ = 0;

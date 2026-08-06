@@ -1,0 +1,6 @@
+{
+  "type": "parameter-drivers",
+  "bpm": 120,
+  "timeSignature": 4,
+  "note": "Formula test, not a render test. Locks the driver-lane evaluator that all three engines implement: src/core/parameter_drivers.cpp here, lib/phonoscope-drivers.ts in the dashboard (the reference), and resolvedLaneValues in PhonoscopeStore.swift. Covers the triggered attack/hold/release envelope and retriggering, every/offset gating on beat and downbeat, modifier summation and its deliberate overshoot, add versus strongest combination, the overshoot guard, timer and song pulses including counted song events, the continuous followers and their bands, seeded random determinism, multi-settings-group merge (lanes stack, scalars layer with the later group winning), and the rarity ordering strongest resolves by. The scenario script is defined in runParameterDriversCase() and mirrored by ParitySelfTests.testParameterDriverParity(); changing either means changing both and re-recording expected.json."
+}

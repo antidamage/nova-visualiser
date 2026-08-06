@@ -1,0 +1,6 @@
+{
+  "type": "scene-blend",
+  "invariant": "At zero scene coverage every mode must equal Linear -- the particle layer is an alpha mask, not a black plate. runSceneBlendCase() asserts this outright before digesting, because a hash cannot say which property broke.",
+  "blendValues": [0, 0.4999, 0.5, 1, 1.4999, 1.5, 2, 2.4999, 2.5, 3, 4],
+  "note": "Formula test, not a render test. Locks how the scene layer meets the backdrop, which both engines implement in the composite shader (src/shaders/composite.frag here, phonoscope_composite in PhonoscopeShader.metal). Covers the four modes on the driven __sceneBlend axis (0 linear, 1 screen, 2 overlay, 3 multiply), the points where that axis snaps from one mode to the next, the un-premultiply that precedes the blend, and the fallback to plain source-over where the backdrop does not cover. Mode 0 must reproduce the `composite` case's arithmetic exactly -- that is what proves an undriven picture is composited as it always was. The grid is defined in runSceneBlendCase() and mirrored by ParitySelfTests.testSceneBlendParity(); changing either means changing both and re-recording expected.json."
+}

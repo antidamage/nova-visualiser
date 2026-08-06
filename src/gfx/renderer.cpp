@@ -1,5 +1,6 @@
 #include "gfx/renderer.h"
 
+#include "core/centre_image_reference.h"
 #include "core/effect_scale.h"
 
 #include <epoxy/gl.h>
@@ -58,10 +59,6 @@ constexpr float kBloomScatter = 0.5f;
 // the same total energy, though this one spreads it over more octaves.
 constexpr float kCompositeIntensity = 1.45f;
 
-// Backdrop band height as a fraction of the frame. tvOS gives
-// `FluidBackgroundView` a frame of `geometry.size.height / 3`.
-constexpr float kFluidBandFraction = 1.0f / 3.0f;
-
 // Continuous, render-rate-independent clock for the backdrop. Deliberately not
 // the signal clock: the backdrop must keep drifting while playback is paused or
 // between tracks, exactly as it does on tvOS.
@@ -118,6 +115,10 @@ bool Renderer::initialise(int width, int height, std::string& error) {
               shaders::text_overlay_frag)) {
     return false;
   }
+  if (!raster(centreImageProgram_, "centre_image", shaders::fullscreen_vert,
+              shaders::centre_image_frag)) {
+    return false;
+  }
   if (!raster(glowBlurProgram_, "glow_blur", shaders::fullscreen_vert, shaders::glow_blur_frag)) {
     return false;
   }
@@ -131,8 +132,13 @@ bool Renderer::initialise(int width, int height, std::string& error) {
   compositeIntensity_ = glGetUniformLocation(compositeProgram_, "intensity");
   compositeBackground_ = glGetUniformLocation(compositeProgram_, "background");
   compositeUseFluid_ = glGetUniformLocation(compositeProgram_, "useFluid");
+  compositeBlendMode_ = glGetUniformLocation(compositeProgram_, "sceneBlendMode");
   fluidUniforms_.bandResolution = glGetUniformLocation(fluidProgram_, "bandResolution");
   fluidUniforms_.bandFraction = glGetUniformLocation(fluidProgram_, "bandFraction");
+  fluidUniforms_.bandWidthFraction = glGetUniformLocation(fluidProgram_, "bandWidthFraction");
+  fluidUniforms_.vignetteColor = glGetUniformLocation(fluidProgram_, "vignetteColor");
+  fluidUniforms_.vignetteOpacity = glGetUniformLocation(fluidProgram_, "vignetteOpacity");
+  fluidUniforms_.vignetteSize = glGetUniformLocation(fluidProgram_, "vignetteSize");
   fluidUniforms_.time = glGetUniformLocation(fluidProgram_, "time");
   fluidUniforms_.background = glGetUniformLocation(fluidProgram_, "background");
   fluidUniforms_.accent = glGetUniformLocation(fluidProgram_, "accent");
@@ -150,9 +156,15 @@ bool Renderer::initialise(int width, int height, std::string& error) {
   textColor_ = glGetUniformLocation(textProgram_, "textColor");
   textScale_ = glGetUniformLocation(textProgram_, "messageScale");
   textHasColor_ = glGetUniformLocation(textProgram_, "hasColor");
+  centreImageExtentTo_ = glGetUniformLocation(centreImageProgram_, "halfExtentTo");
+  centreImageExtentFrom_ = glGetUniformLocation(centreImageProgram_, "halfExtentFrom");
+  centreImageFadeUniform_ = glGetUniformLocation(centreImageProgram_, "fade");
+  centreImageHasFrom_ = glGetUniformLocation(centreImageProgram_, "hasFrom");
   glowBlurAxisTexel_ = glGetUniformLocation(glowBlurProgram_, "axisTexel");
   glowBlurSigma_ = glGetUniformLocation(glowBlurProgram_, "sigma");
   glowOverlayOpacity_ = glGetUniformLocation(glowOverlayProgram_, "opacity");
+  glowOverlayOverdrive_ = glGetUniformLocation(glowOverlayProgram_, "overdrive");
+  glowOverlayClamped_ = glGetUniformLocation(glowOverlayProgram_, "glowClamped");
   glowOverlayBlendMode_ = glGetUniformLocation(glowOverlayProgram_, "blendMode");
   auto encodeUniforms = [](uint32_t program) {
     EncodeUniforms uniforms;
@@ -165,10 +177,16 @@ bool Renderer::initialise(int width, int height, std::string& error) {
   };
   p010Uniforms_ = encodeUniforms(p010Program_);
   nv12Uniforms_ = encodeUniforms(nv12Program_);
-  if (compositeBackground_ < 0 || compositeUseFluid_ < 0 || p010Uniforms_.outputSize < 0 ||
-      fluidUniforms_.bandResolution < 0 || textColor_ < 0 ||
-      textScale_ < 0 || glowBlurAxisTexel_ < 0 || glowBlurSigma_ < 0 ||
-      glowOverlayOpacity_ < 0 || glowOverlayBlendMode_ < 0) {
+  if (compositeBackground_ < 0 || compositeUseFluid_ < 0 || compositeBlendMode_ < 0 ||
+      p010Uniforms_.outputSize < 0 ||
+      fluidUniforms_.bandResolution < 0 || fluidUniforms_.bandWidthFraction < 0 ||
+      fluidUniforms_.vignetteColor < 0 || fluidUniforms_.vignetteOpacity < 0 ||
+      fluidUniforms_.vignetteSize < 0 || textColor_ < 0 ||
+      textScale_ < 0 || centreImageExtentTo_ < 0 || centreImageExtentFrom_ < 0 ||
+      centreImageFadeUniform_ < 0 || centreImageHasFrom_ < 0 ||
+      glowBlurAxisTexel_ < 0 || glowBlurSigma_ < 0 ||
+      glowOverlayOpacity_ < 0 || glowOverlayOverdrive_ < 0 || glowOverlayClamped_ < 0 ||
+      glowOverlayBlendMode_ < 0) {
     error = "expected uniforms were optimised out of the shader programs";
     return false;
   }
@@ -292,11 +310,24 @@ void Renderer::renderFluidBackground(double time) {
   glClear(GL_COLOR_BUFFER_BIT);
 
   glUseProgram(fluidProgram_);
+  // Clamped here rather than trusted from the driver: a lane is allowed to
+  // overshoot its declared range by design, and a band wider than the frame
+  // would put `bandLeft` outside the drawable.
+  const float heightFraction = std::clamp(fluid_.heightFraction, 0.0f, 1.0f);
+  const float widthFraction = std::clamp(fluid_.widthFraction, 0.0f, 1.0f);
   // The band's own drawable size, which is what sets the field aspect and the
-  // grain frequency on tvOS.
-  glUniform2f(fluidUniforms_.bandResolution, static_cast<float>(fluidWidth_),
-              static_cast<float>(fluidHeight_) * kFluidBandFraction);
-  glUniform1f(fluidUniforms_.bandFraction, kFluidBandFraction);
+  // grain frequency on tvOS. Both axes now, because the band is no longer
+  // full-width -- using the frame width here would stretch the blob field
+  // sideways as the band narrowed.
+  glUniform2f(fluidUniforms_.bandResolution,
+              static_cast<float>(fluidWidth_) * widthFraction,
+              static_cast<float>(fluidHeight_) * heightFraction);
+  glUniform1f(fluidUniforms_.bandFraction, heightFraction);
+  glUniform1f(fluidUniforms_.bandWidthFraction, widthFraction);
+  glUniform3f(fluidUniforms_.vignetteColor, fluid_.vignette.x, fluid_.vignette.y,
+              fluid_.vignette.z);
+  glUniform1f(fluidUniforms_.vignetteOpacity, std::clamp(fluid_.vignetteOpacity, 0.0f, 1.0f));
+  glUniform1f(fluidUniforms_.vignetteSize, std::max(0.0f, fluid_.vignetteSize));
   glUniform1f(fluidUniforms_.time, static_cast<float>(time));
   glUniform3f(fluidUniforms_.background, fluid_.background.x, fluid_.background.y,
               fluid_.background.z);
@@ -373,6 +404,80 @@ void Renderer::renderMessage(const SceneSnapshot& snapshot) {
   glUniform1i(textHasColor_, messageHasColor_ ? 1 : 0);
   // Emoji arrive premultiplied; the text mask does not. One blend func cannot
   // serve both, so the shader premultiplies the tinted text instead.
+  glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
+  glBindVertexArray(vao_);
+  glDrawArrays(GL_TRIANGLES, 0, 3);
+  glDisable(GL_BLEND);
+  // Leave the active unit where every other pass expects to find it.
+  glActiveTexture(GL_TEXTURE0);
+}
+
+bool Renderer::bindCentreImage(int slot, const std::shared_ptr<const DecodedImage>& image) {
+  glActiveTexture(GL_TEXTURE0 + static_cast<uint32_t>(slot));
+  if (!image || image->width <= 0 || image->height <= 0) {
+    // Still bind something: a sampler left pointing at a deleted or unwritten
+    // texture is undefined, and the shader's own extent check is what actually
+    // stops the plane being drawn.
+    glBindTexture(GL_TEXTURE_2D, messageTexture_);
+    cachedCentreImages_[static_cast<size_t>(slot)].reset();
+    return false;
+  }
+
+  const size_t index = static_cast<size_t>(slot);
+  if (cachedCentreImages_[index] == image) {
+    glBindTexture(GL_TEXTURE_2D, centreImageTextures_[index]);
+    return true;
+  }
+
+  // Reallocated per image rather than kept at a fixed size: these are sized to
+  // the picture, not to the frame, and glTexStorage2D is immutable.
+  if (centreImageTextures_[index] != 0) glDeleteTextures(1, &centreImageTextures_[index]);
+  glGenTextures(1, &centreImageTextures_[index]);
+  glBindTexture(GL_TEXTURE_2D, centreImageTextures_[index]);
+  glTexStorage2D(GL_TEXTURE_2D, 1, GL_RGBA8, image->width, image->height);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+  glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+  glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, image->width, image->height, GL_RGBA,
+                  GL_UNSIGNED_BYTE, image->rgba.data());
+  cachedCentreImages_[index] = image;
+  return true;
+}
+
+// The other half of the centre slot. Drawn immediately before the message and
+// therefore before the glow overlay, so an image blooms with the rest of the
+// picture exactly as the text does.
+void Renderer::renderCentreImage(const SceneSnapshot& snapshot) {
+  const bool hasTo = bindCentreImage(0, snapshot.centreImage);
+  const bool hasFrom = bindCentreImage(1, snapshot.centreImageFrom);
+  if (!hasTo && !hasFrom) {
+    glActiveTexture(GL_TEXTURE0);
+    return;
+  }
+
+  // Contain-fit and scale come from the shared reference header rather than
+  // being worked out in the shader, so the conformance corpus can lock them.
+  const float frameAspect = renderHeight_ > 0
+      ? static_cast<float>(renderWidth_) / static_cast<float>(renderHeight_)
+      : 0.0f;
+  auto extentOf = [&](const std::shared_ptr<const DecodedImage>& image) {
+    if (!image || image->height <= 0) return CentreImageExtent{};
+    const float aspect = static_cast<float>(image->width) / static_cast<float>(image->height);
+    return centreImageHalfExtent(frameAspect, aspect, snapshot.centreImageHeight,
+                                 snapshot.messageScale);
+  };
+  const CentreImageExtent to = extentOf(snapshot.centreImage);
+  const CentreImageExtent from = extentOf(snapshot.centreImageFrom);
+
+  glEnable(GL_BLEND);
+  glUseProgram(centreImageProgram_);
+  glUniform2f(centreImageExtentTo_, to.halfWidth, to.halfHeight);
+  glUniform2f(centreImageExtentFrom_, from.halfWidth, from.halfHeight);
+  glUniform1f(centreImageFadeUniform_, snapshot.centreImageFade);
+  glUniform1i(centreImageHasFrom_, hasFrom ? 1 : 0);
+  // Both planes are premultiplied at decode time.
   glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
   glBindVertexArray(vao_);
   glDrawArrays(GL_TRIANGLES, 0, 3);
@@ -549,15 +654,21 @@ bool Renderer::render(const SnapshotPtr& latest, const SnapshotPtr& previous, fl
   glUniform1i(compositeUseFluid_, fluid_.enabled ? 1 : 0);
   glUniform4f(compositeBackground_, latest->background.x, latest->background.y,
               latest->background.z, latest->background.w);
+  glUniform1i(compositeBlendMode_, static_cast<int>(latest->sceneBlendMode));
   glBindVertexArray(vao_);
   glDrawArrays(GL_TRIANGLES, 0, 3);
 
-  // --- centre message -------------------------------------------------------
+  // --- centre slot ----------------------------------------------------------
   // Drawn into the composite target, on top of everything and outside the bloom
-  // chain so the text stays legible rather than blooming into a smear. This
-  // call was missing entirely: `renderMessage` existed but nothing invoked it,
-  // so the message was never in the stream at any point, which is why it had to
-  // be drawn client-side on tvOS.
+  // chain so the centrepiece stays legible rather than blooming into a smear.
+  // The message call was once missing entirely: `renderMessage` existed but
+  // nothing invoked it, so the message was never in the stream at any point,
+  // which is why it had to be drawn client-side on tvOS.
+  //
+  // Only one of these two ever draws anything in a given frame -- the
+  // simulation decides which -- except during a colour-theme change, when the
+  // image pass dissolves between two images.
+  renderCentreImage(*latest);
   renderMessage(*latest);
 
   // --- glow overlay ---------------------------------------------------------
@@ -624,6 +735,8 @@ void Renderer::runGlowOverlay(const SceneSnapshot& snapshot) {
   glActiveTexture(GL_TEXTURE1);
   glBindTexture(GL_TEXTURE_2D, glowBlurTextures_[1]);
   glUniform1f(glowOverlayOpacity_, opacity);
+  glUniform1f(glowOverlayOverdrive_, snapshot.glowOverdrive);
+  glUniform1i(glowOverlayClamped_, snapshot.glowClamped ? 1 : 0);
   glUniform1i(glowOverlayBlendMode_, static_cast<int>(snapshot.glowBlendMode));
   glDrawArrays(GL_TRIANGLES, 0, 3);
 
@@ -888,6 +1001,13 @@ void Renderer::shutdown() {
   messageColorTexture_ = 0;
   messageHasColor_ = false;
   cachedMessage_.clear();
+  for (size_t slot = 0; slot < centreImageTextures_.size(); ++slot) {
+    if (centreImageTextures_[slot] != 0) glDeleteTextures(1, &centreImageTextures_[slot]);
+    centreImageTextures_[slot] = 0;
+    // Cleared too: the cached pointer is what says "this texture already holds
+    // that image", and the texture it referred to has just gone.
+    cachedCentreImages_[slot].reset();
+  }
   if (glowTexture_ != 0) glDeleteTextures(1, &glowTexture_);
   for (size_t slot = 0; slot < glowBlurTextures_.size(); ++slot) {
     if (glowBlurTextures_[slot] != 0) glDeleteTextures(1, &glowBlurTextures_[slot]);

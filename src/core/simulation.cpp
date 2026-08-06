@@ -4,6 +4,8 @@
 #include <chrono>
 #include <cmath>
 
+#include "core/centre_image_reference.h"
+
 namespace nova {
 namespace {
 
@@ -95,11 +97,49 @@ void Simulation::ingest() {
   module_ = next.module;
   reloadGeneration_ = next.reloadGeneration;
   signal_ = next.signal;
+  // What the centre of the frame holds, in one place.
+  //
+  //  1. a non-blank message draws text and no image;
+  //  2. otherwise the live colour theme's image, if it supplies one;
+  //  3. otherwise nothing.
+  //
+  // Emptying the text box is "stop overriding", not "show nothing", which is the
+  // only reading that makes clearing it reversible -- and a theme with no image
+  // and no message draws nothing at all rather than holding the last one.
   message_ = next.message;
+  std::shared_ptr<const DecodedImage> centre =
+      next.message.empty() ? next.themeImage : nullptr;
+
+  if (centre != centreImage_) {
+    // Identity, not contents: two entries naming the same library image are the
+    // same decoded buffer, so moving between them is not a cross-fade at all.
+    centreImagePrev_ = centreImage_;
+    centreImage_ = centre;
+    centreImageFadeSeconds_ = 0.0;
+    // Nothing to fade from, or no transition to fade over, means it is simply
+    // there -- a first paint should not dissolve up from an empty frame.
+    centreImageFade_ = (centreImagePrev_ && transitionDuration_ > 0.0) ? 0.0 : 1.0;
+  }
+
+  // Authored as a percentage, held as a fraction -- the same convention the
+  // frame geometry uses, and for the same reason: everything downstream of here
+  // works in unit space.
+  centreHeight_ = clampValue(next.centreHeight / 100.0, 0.0, 1.0);
   messageScale_ = clampValue(next.messageScale, 0.1, 5.0);
   glowBlurAmount_ = clampValue(next.glowBlurAmount, 0.0, 20.0);
   glowOpacity_ = clampValue(next.glowOpacity, 0.0, 100.0);
+  glowOverdrive_ = clampValue(next.glowOverdrive, 1.0, 10.0);
+  glowClamped_ = next.glowClamped;
   glowBlendMode_ = next.glowBlendMode;
+  // Authored as percentages, held as fractions. The divide happens exactly here
+  // so that everything downstream -- the snapshot, both shaders,
+  // background_band_reference.h and its recorded digests -- keeps working in
+  // unit space and none of it had to move when the controls became 0-100.
+  backgroundHeight_ = clampValue(next.backgroundHeight / 100.0, 0.0, 1.0);
+  backgroundWidth_ = clampValue(next.backgroundWidth / 100.0, 0.0, 1.0);
+  vignetteOpacity_ = clampValue(next.vignetteOpacity / 100.0, 0.0, 1.0);
+  vignetteSize_ = clampValue(next.vignetteSize, 0.0, 3.0);
+  sceneBlendMode_ = next.sceneBlendMode;
 
   if (requiresRebuild) {
     settings_ = next.settings;
@@ -119,6 +159,7 @@ SnapshotPtr Simulation::step() {
   const float dt = static_cast<float>(kSimulationStep);
   simulationTime_ += kSimulationStep;
   advanceConfiguration(kSimulationStep);
+  applyFieldExtents();
 
   Diagnostics diagnostics;
   if (signal_.beatIndex != lastBeatIndex_) {
@@ -129,14 +170,40 @@ SnapshotPtr Simulation::step() {
   advanceFieldWaves(dt);
   processEffects(diagnostics);
   integrate(dt);
-  diagnostics.entityCount = static_cast<int>(entities_.size());
+  // Counted live rather than allocated: a gated field holds cells it is not
+  // drawing, and reporting those would make the overlay claim work the renderer
+  // is not doing.
+  size_t liveEntities = 0;
+  for (size_t index = 0; index < entities_.size(); ++index) {
+    if (entityLive(index)) ++liveEntities;
+  }
+  diagnostics.entityCount = static_cast<int>(liveEntities);
   diagnostics.particleCount =
-      std::min(module_->resources().maxParticles, static_cast<int>(entities_.size()));
+      std::min(module_->resources().maxParticles, static_cast<int>(liveEntities));
   return publish(diagnostics, (now() - started) * 1000);
 }
 
 void Simulation::advanceConfiguration(double delta) {
+  // The centre image dissolves on a LINEAR ramp over the same transition the
+  // palette chases across, so the picture's centrepiece and its colours settle
+  // together. Linear rather than the chase below on purpose: an exponential
+  // approach only ever gets close, so the outgoing image would never reach zero
+  // and could never be released.
+  //
+  // Deliberately ABOVE the pause check. Pausing means "stop advancing the
+  // playlist", not "freeze a dissolve that is already in flight" -- and a
+  // manual skip pauses the rotation, so leaving this below the early return
+  // stranded the fade at 0 and held the OUTGOING image on screen permanently.
+  // A transition that has begun always finishes.
+  if (centreImageFade_ < 1.0) {
+    centreImageFadeSeconds_ += delta;
+    centreImageFade_ = centreImageFade(static_cast<float>(centreImageFadeSeconds_),
+                                       static_cast<float>(transitionDuration_));
+    if (centreImageFade_ >= 1.0) centreImagePrev_.reset();
+  }
+
   if (transitionPaused_) return;
+
   const double amount = chaseAmount(delta, transitionDuration_);
   palette_ = palette_.approached(targetPalette_, amount);
   for (const auto& [key, target] : targetSettings_) {
@@ -430,6 +497,7 @@ void Simulation::instantiateEntity(const json::Value& value, const Vec3& positio
 
 void Simulation::rebuild() {
   entities_.clear();
+  entityLive_.clear();
   fields_.clear();
   fieldWaves_.clear();
   effectQueue_.clear();
@@ -479,22 +547,16 @@ void Simulation::rebuild() {
     const float normalizedDensity = clampValue(density, 0.05f, 1.0f);
     const float axisScale = is3D ? std::pow(normalizedDensity, 1.0f / 3.0f) : std::sqrt(normalizedDensity);
 
-    const int columns =
+    // Counts at the *reference* extent -- the footprint the module author
+    // declared as `resolution` x `spacing`. These set the gap; whether the grid
+    // is then allocated at that size or at the full bounds is decided below.
+    const int referenceColumns =
         layout == "grid" ? std::max(1, static_cast<int>(std::lround(baseColumns * axisScale))) : baseColumns;
-    const int rows =
+    const int referenceRows =
         layout == "grid" ? std::max(1, static_cast<int>(std::lround(baseRows * axisScale))) : baseRows;
     const int depth =
         layout == "grid" ? std::max(1, static_cast<int>(std::lround(baseDepth * axisScale))) : baseDepth;
 
-    const int requestedCount = requested > 0 ? requested : baseColumns * baseRows * baseDepth;
-    const int scaledCount = layout == "grid"
-                                ? columns * rows * depth
-                                : static_cast<int>(std::lround(requestedCount * normalizedDensity));
-    const int count =
-        std::min(std::max(1, scaledCount), maximum - static_cast<int>(entities_.size()));
-    if (count <= 0) break;
-
-    const size_t start = entities_.size();
     std::vector<double> declaredSpacing;
     if (const json::Value* value = field->find("spacing")) declaredSpacing = value->numberArray();
     const bool usesDensity = field->find("density") != nullptr;
@@ -511,10 +573,42 @@ void Simulation::rebuild() {
       return declared * static_cast<float>(baseCount - 1) / static_cast<float>(scaled - 1);
     };
 
-    const std::optional<float> spacingX = resolvedSpacing(0, baseColumns, columns);
-    const std::optional<float> spacingY = resolvedSpacing(1, baseRows, rows);
+    const std::optional<float> spacingX = resolvedSpacing(0, baseColumns, referenceColumns);
+    const std::optional<float> spacingY = resolvedSpacing(1, baseRows, referenceRows);
     const std::optional<float> spacingZ = resolvedSpacing(2, baseDepth, depth);
     const Vec3 center = (boundsMin + boundsMax) * 0.5f;
+
+    // A field that declares `extentX`/`extentY` sizes itself from the gap
+    // rather than the other way round: the gap is whatever complexity made it,
+    // and the grid is allocated to fill the module bounds at that gap. The live
+    // extent then gates a centred sub-rectangle every tick (`applyFieldExtents`)
+    // so a driver can sweep it without a structural rebuild.
+    //
+    // Fields that declare neither keep the original sizing exactly, which is
+    // what holds every other module's conformance digest still.
+    const json::Value* extentXValue = field->find("extentX");
+    const json::Value* extentYValue = field->find("extentY");
+    const bool gated = layout == "grid" && (extentXValue != nullptr || extentYValue != nullptr);
+
+    auto spanCount = [](float span, std::optional<float> gap, int fallback) {
+      if (!gap || *gap <= 0 || span <= 0) return fallback;
+      return std::max(1, static_cast<int>(std::lround(span / *gap)) + 1);
+    };
+
+    const int columns = gated ? spanCount(boundsMax.x - boundsMin.x, spacingX, referenceColumns)
+                              : referenceColumns;
+    const int rows =
+        gated ? spanCount(boundsMax.y - boundsMin.y, spacingY, referenceRows) : referenceRows;
+
+    const int requestedCount = requested > 0 ? requested : baseColumns * baseRows * baseDepth;
+    const int scaledCount = layout == "grid"
+                                ? columns * rows * depth
+                                : static_cast<int>(std::lround(requestedCount * normalizedDensity));
+    const int count =
+        std::min(std::max(1, scaledCount), maximum - static_cast<int>(entities_.size()));
+    if (count <= 0) break;
+
+    const size_t start = entities_.size();
 
     json::Value fieldTemplate = resolvedScene;
     if (const json::Value* templateId = field->find("template")) {
@@ -590,6 +684,13 @@ void Simulation::rebuild() {
                             ? (legacyLine.size() > 1 ? legacyLine[1] : range.lineStartSlot)
                             : lineEnd[0];
     range.radialBeatWave = radialBeatWave(resolvedScene);
+    range.gated = gated;
+    if (extentXValue != nullptr) range.extentX = *extentXValue;
+    if (extentYValue != nullptr) range.extentY = *extentYValue;
+    // Full extent until the first `applyFieldExtents`, so a field is never
+    // momentarily empty between the rebuild and the tick that sizes it.
+    range.liveColumns = columns;
+    range.liveRows = rows;
     fields_.push_back(std::move(range));
 
     if (fields_.back().radialBeatWave.present) {
@@ -619,6 +720,8 @@ void Simulation::rebuild() {
     range.depth = 1;
     range.topology = "nearest";
     range.spacing = 1;
+    range.liveColumns = range.columns;
+    range.liveRows = range.rows;
     range.lineStartSlot = "primary";
     range.lineEndSlot = "primary";
     fields_.push_back(std::move(range));
@@ -645,7 +748,64 @@ void Simulation::rebuild() {
   }
 
   visitedTokens_.assign(entities_.size(), 0);
+  entityLive_.assign(entities_.size(), 1);
   effectQueue_.reserve(8192);
+}
+
+void Simulation::applyFieldExtents() {
+  bool anyGated = false;
+  for (const FieldRange& field : fields_) {
+    if (field.gated) {
+      anyGated = true;
+      break;
+    }
+  }
+  if (!anyGated) return;
+
+  const ExpressionInputs inputs = expressionInputs(0.5);
+  // An allocated grid of N cells spans N-1 gaps across the module bounds, so an
+  // extent of `fraction` is that many gaps of it. Working in cells rather than
+  // in world units keeps this exact at every complexity: the gap never has to
+  // be divided back out.
+  auto liveCount = [](const json::Value& extent, const ExpressionInputs& in, int allocated) {
+    const double fraction = clampValue(Expression::evaluate(&extent, in, 1.0), 0.0, 1.0);
+    const int desired = std::max(
+        1, static_cast<int>(std::lround(fraction * static_cast<double>(allocated - 1))) + 1);
+    // Snap to the allocated count's parity. The live rectangle is centred, so an
+    // odd difference would sit it half a gap off centre -- and a driver sweeping
+    // the extent would make the whole grid shimmer sideways as it grew.
+    const int margin = std::max(0, (allocated - std::min(desired, allocated)) / 2);
+    return std::max(1, allocated - margin * 2);
+  };
+
+  entityLive_.assign(entities_.size(), 1);
+  for (FieldRange& field : fields_) {
+    if (!field.gated) continue;
+    field.liveColumns =
+        field.extentX.isNull() ? field.columns : liveCount(field.extentX, inputs, field.columns);
+    field.liveRows =
+        field.extentY.isNull() ? field.rows : liveCount(field.extentY, inputs, field.rows);
+    field.columnBegin = (field.columns - field.liveColumns) / 2;
+    field.rowBegin = (field.rows - field.liveRows) / 2;
+
+    for (size_t index = field.begin; index < field.end && index < entityLive_.size(); ++index) {
+      const int local = static_cast<int>(index - field.begin);
+      const int x = local % field.columns;
+      const int y = (local / field.columns) % field.rows;
+      if (field.cellIsLive(x, y)) continue;
+      entityLive_[index] = 0;
+      // Park the dead cell rather than leaving it wherever the last live tick
+      // left it. It is not integrated while dead, so without this it would
+      // reappear mid-ripple when the extent grows back over it.
+      Entity& entity = entities_[index];
+      entity.position = entity.origin;
+      entity.velocity = Vec3{};
+      entity.energy = 0;
+      entity.waveEnergy = 0;
+      entity.waveTarget = 0;
+      entity.waveOffset = Vec3{};
+    }
+  }
 }
 
 void Simulation::emitBeatParticles() {
@@ -730,14 +890,21 @@ void Simulation::enqueueRootEffects() {
     const float release = value(source.release, 0.55);
     const float flashPower = value(source.flashPower, 4.5);
 
+    // Both of these are measured over the live cells only. A gated field is
+    // allocated at its full size, and taking the allocated corner here would
+    // size every ripple to a lattice most of which is not on screen.
     Vec3 centerPosition;
+    size_t live = 0;
     for (size_t index = field.begin; index < field.end; ++index) {
+      if (!entityLive(index)) continue;
       centerPosition += entities_[index].origin;
+      ++live;
     }
-    centerPosition = centerPosition / static_cast<float>(std::max<size_t>(1, field.count()));
+    centerPosition = centerPosition / static_cast<float>(std::max<size_t>(1, live));
 
     float maximumRadius = 0;
     for (size_t index = field.begin; index < field.end; ++index) {
+      if (!entityLive(index)) continue;
       maximumRadius = std::max(maximumRadius, distance(entities_[index].origin, centerPosition));
     }
 
@@ -782,6 +949,7 @@ void Simulation::advanceFieldWaves(float dt) {
       const float nextRadius = wave.radius + wave.speed * dt;
 
       for (size_t entityIndex = field.begin; entityIndex < field.end; ++entityIndex) {
+        if (!entityLive(entityIndex)) continue;
         Entity& entity = entities_[entityIndex];
         const Vec3 radial = entity.origin - wave.center;
         const float dist = length(radial);
@@ -893,6 +1061,11 @@ std::vector<size_t> Simulation::neighbours(size_t index) const {
     return {before, after};
   }
 
+  // A dead cell is not part of the lattice: it neither conducts an effect nor
+  // receives one, so a ripple stops at the live boundary instead of crossing
+  // the gap and re-emerging on the far side.
+  if (!entityLive(index)) return {};
+
   const int columns = field->columns;
   const int rows = field->rows;
   const int depth = field->depth;
@@ -904,6 +1077,7 @@ std::vector<size_t> Simulation::neighbours(size_t index) const {
   result.reserve(6);
   auto append = [&](int nx, int ny, int nz) {
     if (nx < 0 || nx >= columns || ny < 0 || ny >= rows || nz < 0 || nz >= depth) return;
+    if (!field->cellIsLive(nx, ny)) return;
     const size_t neighbour =
         field->begin + static_cast<size_t>(nz * columns * rows + ny * columns + nx);
     if (field->contains(neighbour)) result.push_back(neighbour);
@@ -928,6 +1102,7 @@ void Simulation::integrate(float dt) {
   const float time = static_cast<float>(signal_.time);
 
   for (size_t index = 0; index < entities_.size(); ++index) {
+    if (!entityLive(index)) continue;
     Entity& entity = entities_[index];
     entity.age += dt;
     if (entity.lifetime > 0 && entity.age >= entity.lifetime) {
@@ -989,7 +1164,12 @@ SnapshotPtr Simulation::publish(Diagnostics diagnostics, double elapsedMilliseco
   snapshot->particles.reserve(entities_.size() * 2);
 
   const bool moduleUsesPalette = module_ != nullptr;
-  for (const Entity& entity : entities_) {
+  for (size_t entityIndex = 0; entityIndex < entities_.size(); ++entityIndex) {
+    // Cells outside a gated field's live extent are not drawn at all. They are
+    // still allocated, which is what lets the extent be driven without a
+    // rebuild, but they contribute nothing to the picture or the draw count.
+    if (!entityLive(entityIndex)) continue;
+    const Entity& entity = entities_[entityIndex];
     const float energy = clampValue(entity.energy, 0.0f, 1.0f);
     const float linearFlare =
         entity.flareThreshold < 1
@@ -1068,14 +1248,18 @@ SnapshotPtr Simulation::publish(Diagnostics diagnostics, double elapsedMilliseco
       snapshot->particles.push_back(line);
     };
 
+    // Wires span the live sub-rectangle only, so the lattice ends cleanly at the
+    // boundary instead of trailing lines out into cells that are not drawn.
+    const int columnEnd = field.columnBegin + field.liveColumns;
+    const int rowEnd = field.rowBegin + field.liveRows;
     for (int z = 0; z < field.depth; ++z) {
-      for (int y = 0; y < field.rows; ++y) {
-        for (int x = 0; x < field.columns; ++x) {
+      for (int y = field.rowBegin; y < rowEnd; ++y) {
+        for (int x = field.columnBegin; x < columnEnd; ++x) {
           const size_t index = field.begin + static_cast<size_t>(z) * layerSize +
                                static_cast<size_t>(y) * static_cast<size_t>(field.columns) +
                                static_cast<size_t>(x);
-          if (x + 1 < field.columns) appendLine(index, index + 1);
-          if (y + 1 < field.rows) appendLine(index, index + static_cast<size_t>(field.columns));
+          if (x + 1 < columnEnd) appendLine(index, index + 1);
+          if (y + 1 < rowEnd) appendLine(index, index + static_cast<size_t>(field.columns));
         }
       }
     }
@@ -1099,11 +1283,26 @@ SnapshotPtr Simulation::publish(Diagnostics diagnostics, double elapsedMilliseco
     snapshot->fluidSpeed = static_cast<float>(speed->second);
   }
   snapshot->message = message_;
+  snapshot->centreImage = centreImage_;
+  snapshot->centreImageFrom = centreImagePrev_;
+  snapshot->centreImageFade = static_cast<float>(centreImageFade_);
+  snapshot->centreImageHeight = static_cast<float>(centreHeight_);
   snapshot->messageScale = static_cast<float>(messageScale_);
   snapshot->messageColor = palette_.color("primaryText", palette_.highlight());
   snapshot->glowBlurAmount = static_cast<float>(glowBlurAmount_);
   snapshot->glowOpacity = static_cast<float>(glowOpacity_);
+  snapshot->glowOverdrive = static_cast<float>(glowOverdrive_);
+  snapshot->glowClamped = glowClamped_;
   snapshot->glowBlendMode = glowBlendMode_;
+  snapshot->backgroundHeight = static_cast<float>(backgroundHeight_);
+  snapshot->backgroundWidth = static_cast<float>(backgroundWidth_);
+  // Black when the theme declares no `vignette` slot, which is the colour the
+  // edge gradients were authored with -- so a theme from before this slot
+  // existed frames the band exactly as it always did.
+  snapshot->vignetteColor = palette_.color("vignette", Vec4{0, 0, 0, 1});
+  snapshot->vignetteOpacity = static_cast<float>(vignetteOpacity_);
+  snapshot->vignetteSize = static_cast<float>(vignetteSize_);
+  snapshot->sceneBlendMode = sceneBlendMode_;
   snapshot->boundsMinimum = module_ ? module_->minimum() : Vec3{-1.7778f, -1, 0};
   snapshot->boundsMaximum = module_ ? module_->maximum() : Vec3{1.7778f, 1, 0};
   snapshot->is3D = module_ ? module_->is3D() : false;

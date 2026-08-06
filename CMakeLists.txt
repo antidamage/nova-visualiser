@@ -26,6 +26,12 @@ if(NOVA_VISUALISER_GPU)
   # message is part of the streamed picture now, and silently dropping it would
   # be a parity regression against tvOS rather than a degraded transport.
   pkg_check_modules(FREETYPE REQUIRED IMPORTED_TARGET freetype2)
+  # libpng decodes the centre image. Required for the same reason FreeType is:
+  # the centre slot is part of the streamed picture, and a build that silently
+  # could not draw an image would be a parity regression rather than a degraded
+  # transport. Taken as a dependency rather than vendored so palettes, tRNS,
+  # 16-bit and interlaced files are somebody else's already-solved problem.
+  pkg_check_modules(PNG REQUIRED IMPORTED_TARGET libpng)
   # SRT carries the Apple TV rung. Optional so a box without libsrt still builds
   # and serves the TCP rung -- which is also the runtime fallback, so a missing
   # library degrades the transport rather than the service.
@@ -54,6 +60,7 @@ add_library(nova_visualiser_core STATIC
   src/core/json.cpp
   src/core/module.cpp
   src/core/palette.cpp
+  src/core/parameter_drivers.cpp
   src/core/simulation.cpp
   src/core/signal.cpp
 )
@@ -70,6 +77,7 @@ if(NOVA_VISUALISER_GPU)
     src/service/engine.cpp
     src/gfx/egl_device.cpp
     src/gfx/gl_util.cpp
+    src/gfx/image_decode.cpp
     src/gfx/renderer.cpp
     src/gfx/text.cpp
     src/encode/cuda_interop.cpp
@@ -88,6 +96,7 @@ if(NOVA_VISUALISER_GPU)
     PkgConfig::AVCODEC
     PkgConfig::EPOXY
     PkgConfig::FREETYPE
+    PkgConfig::PNG
     ${CUDA_DRIVER_LIBRARY}
     EGL
     Threads::Threads

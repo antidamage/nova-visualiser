@@ -38,10 +38,12 @@ void HousePartyProducer::setEnabled(bool enabled) {
   enabled_.store(enabled, std::memory_order_relaxed);
 }
 
-void HousePartyProducer::update(const SignalFrame& signal, const Palette& palette) {
+void HousePartyProducer::update(const SignalFrame& signal, const Palette& palette,
+                                double hueOffsetDegrees) {
   std::lock_guard<std::mutex> lock(mutex_);
   signal_ = signal;
   palette_ = palette;
+  hueOffsetDegrees_ = hueOffsetDegrees;
 }
 
 void HousePartyProducer::run() {
@@ -134,10 +136,12 @@ bool HousePartyProducer::sendFrame() {
 
   double localBrightness = 0;
   double cloudBrightness = 0;
+  double hueOffset = 0;
   {
     std::lock_guard<std::mutex> lock(mutex_);
     localBrightness = smoothedLocalBrightness_;
     cloudBrightness = smoothedCloudBrightness_;
+    hueOffset = clampValue(hueOffsetDegrees_, 0.0, 180.0);
   }
 
   std::string body = "{";
@@ -147,6 +151,7 @@ bool HousePartyProducer::sendFrame() {
   body += "\"peakBrightnessPct\":" + std::to_string(localBrightness) + ",";
   body += "\"cloudPeakBrightnessPct\":" + std::to_string(cloudBrightness) + ",";
   body += "\"transitionSeconds\":0.2,";
+  body += "\"hueOffsetDegrees\":" + std::to_string(hueOffset) + ",";
   body += "\"hueMode\":\"follow\",";
   body += "\"brightnessMode\":\"follow\",";
   body += "\"ambient\":" + std::string(signal.playing ? "false" : "true") + ",";

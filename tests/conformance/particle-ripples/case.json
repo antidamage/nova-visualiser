@@ -8,6 +8,7 @@
     "complexity": 0.6, "intensity": 1.0, "fluid_speed": 0.65, "offset_magnifier": 13,
     "strong_beat_multiplier": 1.65, "peak_threshold": 0.28, "peak_glow": 6.5,
     "anticipation": 0.5, "ramp_up": 0.04, "release": 0.7, "flash_power": 3.8,
-    "trail_length": 7, "grid_wireframe": 0
+    "trail_length": 7, "grid_wireframe": 0,
+    "grid_width": 1, "grid_height": 0.3333
   }
 }
