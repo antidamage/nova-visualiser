@@ -81,6 +81,18 @@ class Renderer {
     // Both are driven parameters, so they arrive resolved for this frame.
     float heightFraction = 1.0f / 3.0f;
     float widthFraction = 1.0f;
+    // The rest of the size control set. With a background image these size the
+    // image; with none they size the band above, exactly as they always have.
+    float scale = 1.0f;
+    ImageFit fit = ImageFit::Manual;
+    bool proportional = true;
+    // The colour theme's background image and the one still leaving, plus the
+    // latched transition between them. Null in both means the procedural field
+    // is the backdrop, which is the original behaviour.
+    std::shared_ptr<const DecodedImage> image;
+    std::shared_ptr<const DecodedImage> imageFrom;
+    float imageFade = 1.0f;
+    CentreTransitionParams imageTransition;
     // Vignette. The colour is a palette slot; the other two are driven. The
     // defaults reproduce the authored `PhonoscopeEdgeVignette` exactly.
     float vignetteOpacity = 0.96f;
@@ -141,7 +153,24 @@ class Renderer {
   void renderMessage(const SceneSnapshot& snapshot);
   // Uploads `image` into `slot` if it is not already there, and reports whether
   // there is anything to draw. Identity is the shared_ptr, never the pixels.
-  bool bindCentreImage(int slot, const std::shared_ptr<const DecodedImage>& image);
+  // A slot's two planes: [0] is the incoming image, [1] the one still leaving
+  // behind it. Allocated lazily and at each image's OWN size -- unlike the
+  // message textures, which are full-frame only because glyph rasterisation is.
+  // The cached pointers are what make "same image" a pointer comparison instead
+  // of a hash of several megabytes every frame.
+  //
+  // One of these per SLOT, because the centre and the backdrop each hold two
+  // planes at once and a shared pair would evict one slot's incoming image
+  // every time the other's changed -- re-uploading megabytes per frame for the
+  // whole of every transition.
+  static constexpr int kCentreImagePlanes = 2;
+  struct ImagePlanes {
+    std::array<uint32_t, kCentreImagePlanes> textures{};
+    std::array<std::shared_ptr<const DecodedImage>, kCentreImagePlanes> cached{};
+  };
+
+  bool bindImagePlane(ImagePlanes& planes, int slot, int unit,
+                      const std::shared_ptr<const DecodedImage>& image);
   void renderCentreImage(const SceneSnapshot& snapshot);
 
   int width_ = 0;
@@ -190,6 +219,11 @@ class Renderer {
   int centreImageExtentFrom_ = -1;
   int centreImageFadeUniform_ = -1;
   int centreImageHasFrom_ = -1;
+  int centreImageMode_ = -1;
+  int centreImageAxis_ = -1;
+  int centreImageSegments_ = -1;
+  int centreImageReturnOrigin_ = -1;
+  int centreImageFrameAspect_ = -1;
   int glowBlurAxisTexel_ = -1;
   int glowBlurSigma_ = -1;
   int glowOverlayOpacity_ = -1;
@@ -215,6 +249,20 @@ class Renderer {
     int apexGlow = -1;
     int blobScale = -1;
     int blobSoftness = -1;
+
+    // The background image, when the colour theme names one. Same set the
+    // centre pass carries, because it is the same transition machinery.
+    int hasImage = -1;
+    int hasImageFrom = -1;
+    int imageHalfExtentTo = -1;
+    int imageHalfExtentFrom = -1;
+    int imageProgress = -1;
+    int imageMode = -1;
+    int imageAxisRadians = -1;
+    int imageSegments = -1;
+    int imageReturnOrigin = -1;
+    int frameAspect = -1;
+    int imageBackdrop = -1;
   };
   FluidUniforms fluidUniforms_;
   EncodeUniforms p010Uniforms_;
@@ -260,14 +308,9 @@ class Renderer {
   TextRasterizer text_;
   std::string cachedMessage_;
 
-  // The centre image's two planes: [0] is the incoming image, [1] the one still
-  // fading out behind it. Allocated lazily and at the image's OWN size -- unlike
-  // the message textures, which are full-frame only because glyph rasterisation
-  // is. The cached pointers are what make "same image" a pointer comparison
-  // instead of a hash of several megabytes every frame.
-  static constexpr int kCentreImagePlanes = 2;
-  std::array<uint32_t, kCentreImagePlanes> centreImageTextures_{};
-  std::array<std::shared_ptr<const DecodedImage>, kCentreImagePlanes> cachedCentreImages_{};
+  // The centre slot's planes, and the backdrop's. See `ImagePlanes` above.
+  ImagePlanes centrePlanes_;
+  ImagePlanes backgroundPlanes_;
 
   static constexpr int kBloomMips = 5;
   std::array<uint32_t, kBloomMips> bloomTextures_{};

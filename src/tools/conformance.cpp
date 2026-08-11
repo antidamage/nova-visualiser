@@ -12,6 +12,7 @@
 // `--update` rewrites each case's `expected.json`. Only do that when a spec
 // change is intended, and update the tvOS side in the same commit.
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -28,6 +29,7 @@
 
 #include "core/background_band_reference.h"
 #include "core/centre_image_reference.h"
+#include "core/centre_image_transition.h"
 #include "core/composite_reference.h"
 #include "core/effect_scale.h"
 #include "core/glow_overlay_reference.h"
@@ -253,7 +255,7 @@ CaseResult runBackgroundBandCase(const fs::path& directory, bool update, CaseRes
 }
 
 // Centre-image-formula case. NOT a render test -- it evaluates
-// `centreImageHalfExtent()` and `centreImageFade()` over a grid of frame and
+// `imageHalfExtent()` and `centreImageFade()` over a grid of frame and
 // image aspects, scales and fade times, and digests the result.
 // `ParitySelfTests.testCentreImageParity()` evaluates the identical grid on tvOS.
 //
@@ -276,9 +278,12 @@ CaseResult runCentreImageCase(const fs::path& directory, bool update, CaseResult
       numbers("imageAspects", {0.5, 1.0, 16.0 / 9.0, 2.5, 4.0});
   // Both clamp ends, the identity, and values either side of them.
   const std::vector<double> scales = numbers("scales", {0.0, 0.1, 0.5, 1.0, 2.75, 5.0, 9.0});
-  // The base height, as a fraction: nothing, the default third, full frame, and
-  // an out-of-range value that must clamp rather than run away.
+  // The base size, as fractions: nothing, the default third, full frame, and an
+  // out-of-range value that must not run away. Width is the authored axis and
+  // height the one used only under a manual fit with proportional off, so both
+  // are swept and every combination of mode and flag is taken.
   const std::vector<double> heights = numbers("heightFractions", {0.0, 0.33, 1.0, 1.5});
+  const std::vector<double> widths = numbers("widthFractions", {0.0, 0.33, 1.0, 1.5});
 
   uint64_t hash = 1469598103934665603ULL;
   auto mix = [&hash](float value) {
@@ -288,23 +293,45 @@ CaseResult runCentreImageCase(const fs::path& directory, bool update, CaseResult
     }
   };
 
+  // Every mode against every flag: manual-proportional is the old contract's
+  // successor and the default, manual-free is the only case the height axis is
+  // read at all, and fit and fill derive both axes and must ignore the two
+  // sliders entirely -- which is the property most likely to be got wrong
+  // independently on each side.
+  const std::vector<nova::ImageFit> fits = {
+      nova::ImageFit::Manual, nova::ImageFit::Fit, nova::ImageFit::Fill};
+
   int samples = 0;
   for (double frameAspect : frameAspects) {
     for (double imageAspect : imageAspects) {
-      for (double height : heights) {
-        for (double scale : scales) {
-          const nova::CentreImageExtent extent = nova::centreImageHalfExtent(
-              static_cast<float>(frameAspect), static_cast<float>(imageAspect),
-              static_cast<float>(height), static_cast<float>(scale));
-          mix(extent.halfWidth);
-          mix(extent.halfHeight);
-          ++samples;
+      for (double width : widths) {
+        for (double height : heights) {
+          for (double scale : scales) {
+            for (nova::ImageFit fit : fits) {
+              for (bool proportional : {false, true}) {
+                const nova::ImageExtent extent = nova::imageHalfExtent(
+                    static_cast<float>(frameAspect), static_cast<float>(imageAspect),
+                    static_cast<float>(width), static_cast<float>(height),
+                    static_cast<float>(scale), fit, proportional);
+                mix(extent.halfWidth);
+                mix(extent.halfHeight);
+                ++samples;
+              }
+            }
+          }
         }
       }
     }
   }
 
-  // The cross-fade ramp, including both ends and a zero-length transition --
+  // The mode snap, including both boundaries: a stored binding holds a number
+  // on this axis, so where 0.5 and 1.5 fall is part of the contract.
+  for (double value : numbers("fitValues", {-1.0, 0.0, 0.49, 0.5, 1.0, 1.49, 1.5, 2.0, 7.0})) {
+    mix(static_cast<float>(static_cast<int>(nova::imageFitFor(value))));
+    ++samples;
+  }
+
+  // The whole-duration ramp, including both ends and a zero-length transition --
   // which must resolve to "already there" rather than dividing by zero.
   const std::vector<double> transitions = numbers("fadeTransitions", {0.0, 0.6, 2.5});
   const std::vector<double> elapsed = numbers("fadeElapsed", {0.0, 0.15, 0.6, 1.2, 5.0});
@@ -313,6 +340,71 @@ CaseResult runCentreImageCase(const fs::path& directory, bool update, CaseResult
       mix(nova::centreImageFade(static_cast<float>(seconds), static_cast<float>(transition)));
       ++samples;
     }
+  }
+
+  // The ramp read as a motion profile: attack eases in, hold is flat, release
+  // eases out, and the transition lasts their sum. Phase triples chosen to cover
+  // every degenerate shape as well as the balanced one -- an all-zero ramp (an
+  // instant cut), a bare release (pure ease-out), a bare attack (everything
+  // deferred to the end), and a symmetric profile whose midpoint must land on
+  // exactly 0.5.
+  const std::vector<std::array<double, 3>> ramps = {
+      {0.0, 0.0, 0.0}, {0.0, 0.0, 0.6}, {0.6, 0.0, 0.0}, {0.05, 0.0, 0.6},
+      {0.5, 1.0, 0.5}, {1.0, 0.0, 1.0}, {0.25, 0.5, 1.25},
+  };
+  const std::vector<double> rampElapsed =
+      numbers("rampElapsed", {0.0, 0.05, 0.25, 0.5, 1.0, 1.5, 2.0, 3.0});
+  for (const std::array<double, 3>& ramp : ramps) {
+    for (double seconds : rampElapsed) {
+      mix(nova::transitionRamp(static_cast<float>(seconds), static_cast<float>(ramp[0]),
+                               static_cast<float>(ramp[1]), static_cast<float>(ramp[2])));
+      ++samples;
+    }
+  }
+
+  // Transition geometry. The axis sweep deliberately includes the two cardinals,
+  // both diagonals and a value just short of the wrap, because the segment
+  // parity and the clear distance both change character across them.
+  const std::vector<double> axes = numbers("axisDegrees", {0.0, 45.0, 90.0, 200.0, 359.0});
+  const std::vector<double> divisions = numbers("divisions", {0.0, 1.0, 2.0, 7.0, 10.0});
+  const std::vector<double> progress =
+      numbers("transitionProgress", {0.0, 0.25, 0.49, 0.5, 0.51, 0.75, 1.0});
+  for (double degrees : axes) {
+    const float radians = static_cast<float>(degrees * 3.14159265358979323846 / 180.0);
+    for (double frameAspect : frameAspects) {
+      mix(nova::centreSlideClearDistance(radians, static_cast<float>(frameAspect), 0.3f, 0.165f));
+      ++samples;
+    }
+    for (double cuts : divisions) {
+      const int count = static_cast<int>(cuts);
+      // Sampled across the perpendicular extent, so every segment boundary --
+      // including both outer edges, where the clamp is what stops an off-by-one
+      // from landing outside the segment list.
+      for (int step = 0; step <= 8; ++step) {
+        const float across = -0.4f + 0.1f * static_cast<float>(step);
+        const int segment = nova::centreSlideSegment(across, 0.4f, count);
+        mix(static_cast<float>(segment));
+        mix(nova::centreSlideDirection(segment));
+        ++samples;
+      }
+      for (double fraction : progress) {
+        const float value = static_cast<float>(fraction);
+        const float direction = nova::centreSlideDirection(count % 2);
+        for (bool incoming : {false, true}) {
+          for (bool origin : {false, true}) {
+            mix(nova::centreSlideOffset(value, incoming, direction, 0.75f, origin));
+            ++samples;
+          }
+        }
+      }
+    }
+  }
+  for (double fraction : progress) {
+    const float value = static_cast<float>(fraction);
+    mix(nova::centreFlipScale(value));
+    mix(nova::centreFlipShowsIncoming(value) ? 1.0f : 0.0f);
+    mix(static_cast<float>(static_cast<int>(nova::centreTransitionFor(fraction * 2.0))));
+    ++samples;
   }
 
   char buffer[64];
@@ -587,14 +679,14 @@ CaseResult runParameterDriversCase(const fs::path& directory, bool update, CaseR
   const std::unordered_map<std::string, nova::EffectDeclaration> declarations{{"glow", glow}};
 
   auto driver = [](const std::string& type, int every = 1, int offset = 0, double interval = 4,
-                   const std::string& cadence = "beat", double transition = 0.5) {
+                   const std::string& cadence = "beat", int divide = 1) {
     nova::Driver value;
     value.type = type;
     value.every = every;
     value.offset = offset;
     value.intervalSeconds = interval;
     value.cadence = cadence;
-    value.transitionSeconds = transition;
+    value.divide = divide;
     return value;
   };
   auto binding = [](const std::string& id, double min, double max, double attack, double hold,
@@ -731,12 +823,68 @@ CaseResult runParameterDriversCase(const fs::path& directory, bool update, CaseR
           });
   }
 
-  // 9. Seeded random: held between cadence events, glided when a transition is
-  //    set, and identical on every engine.
-  for (double transition : {0.0, 0.25}) {
-    sweep({{"g", laneOf("l", driver("random", 1, 0, 4, "beat", transition),
-                        {binding("b1", 0, 10, 0.05, 0, 0.6)})}},
-          {}, 8, [&](int tick) { return frameAt(tick * 0.05, 0.05, tick / 3, 0, 1); });
+  // 9. Jittered random timing: one fire per window at a seeded point inside it,
+  //    running the binding envelope, and identical on every engine.
+  {
+    // Sixteen ticks across four beats, so each window is sampled either side of
+    // wherever its own threshold falls.
+    auto jittered = [&](const std::string& cadence, int every, int divide) {
+      sweep({{"g", laneOf("l", driver("random", every, 0, 4, cadence, divide),
+                          {binding("b1", 0, 10, 0, 0, 0)})}},
+            {}, 16, [&](int tick) {
+              nova::SignalFrame frame = frameAt(tick * 0.125, 0.125, tick / 4, tick / 4, 1);
+              const double phase = static_cast<double>(tick % 4) / 4.0;
+              frame.beatPhase = phase;
+              frame.barPhase = phase;
+              return frame;
+            });
+    };
+    jittered("beat", 1, 1);
+    jittered("downbeat", 1, 1);
+    // `every` widens the window rather than skipping windows: one fire per four
+    // bars, at a moving point, not a jittered hit inside the fourth bar.
+    jittered("downbeat", 4, 1);
+    jittered("beat", 1, 4);
+    jittered("timer", 1, 1);
+    // A song has no interior, so this one still fires on the track change.
+    sweep({{"g", laneOf("l", driver("random", 1, 0, 4, "song"),
+                        {binding("b1", 0, 10, 0, 0, 0)})}},
+          {}, 6, [&](int tick) {
+            return frameAt(tick * 0.5, 0.5, tick, tick, static_cast<uint64_t>(1 + tick / 2));
+          });
+    // The envelope is the shape now, so a long release must decay across the
+    // ticks after the fire rather than being ignored as the old glide was.
+    sweep({{"g", laneOf("l", driver("random", 1, 0, 4, "beat"),
+                        {binding("b1", 0, 10, 0, 0, 1.0)})}},
+          {}, 12, [&](int tick) {
+            nova::SignalFrame frame = frameAt(tick * 0.125, 0.125, tick / 4, tick / 4, 1);
+            const double phase = static_cast<double>(tick % 4) / 4.0;
+            frame.beatPhase = phase;
+            frame.barPhase = phase;
+            return frame;
+          });
+  }
+
+  // 9b. Randomised targets: a new draw on each lane event, held between them,
+  //     and stackable with jittered timing.
+  {
+    auto randomised = [&](const nova::Driver& value, int ticks) {
+      nova::EffectBinding bound = binding("b1", 0, 10, 0, 0, 0);
+      bound.randomValue = true;
+      sweep({{"g", laneOf("l", value, {bound})}}, {}, ticks, [&](int tick) {
+        nova::SignalFrame frame = frameAt(tick * 0.125, 0.125, tick / 4, tick / 4, 1);
+        const double phase = static_cast<double>(tick % 4) / 4.0;
+        frame.beatPhase = phase;
+        frame.barPhase = phase;
+        return frame;
+      });
+    };
+    randomised(driver("beat"), 16);
+    randomised(driver("downbeat", 2), 16);
+    // Both halves at once: a random peak at a random moment.
+    randomised(driver("random", 1, 0, 4, "beat"), 16);
+    // A level driver fires nothing, so the draw happens once and holds.
+    randomised(driver("bass"), 8);
   }
 
   // 10. Several settings groups on one entry: lanes stack and keep independent
@@ -772,14 +920,92 @@ CaseResult runParameterDriversCase(const fs::path& directory, bool update, CaseR
     const nova::SignalFrame frame = frameAt(0, 0.05, 0, 0, 1);
     for (const nova::Driver& value :
          {driver("beat"), driver("beat", 2), driver("downbeat"), driver("downbeat", 4),
-          driver("timer", 1, 0, 30), driver("bass"), driver("random")}) {
+          driver("timer", 1, 0, 30), driver("bass"),
+          // Random fires exactly once per window, so it ranks as its cadence
+          // does -- where the old sample-and-hold random ranked at 0 and was
+          // excluded from `strongest` and `common` alike.
+          driver("random"), driver("random", 1, 0, 4, "downbeat"),
+          driver("random", 4, 0, 4, "downbeat")}) {
       const double period = nova::driverPeriodSeconds(value, frame);
       mix(std::isinf(period) ? -2.0 : period);
     }
+    mix(nova::driverPeriodSeconds(driver("random", 1, 0, 4, "song"), frame) ==
+                std::numeric_limits<double>::infinity()
+            ? 1.0
+            : 0.0);
     mix(nova::driverPeriodSeconds(driver("song"), frame) ==
                 std::numeric_limits<double>::infinity()
             ? 1.0
             : 0.0);
+  }
+
+  // 12. Subdivided pulses: the beat cut into quarters and the bar into halves,
+  //     sampled eight times across each whole pulse so both the firing ticks and
+  //     the silent ones between them are covered.
+  {
+    auto subdivided = [&](const std::string& type, int divide) {
+      sweep({{"g", laneOf("l", driver(type, 1, 0, 4, "beat", divide),
+                          {binding("b1", 0, 10, 0, 0, 0)})}},
+            {}, 16, [&](int tick) {
+              nova::SignalFrame frame = frameAt(tick * 0.05, 0.05, tick / 8, tick / 8, 1);
+              const double phase = static_cast<double>(tick % 8) / 8.0;
+              frame.beatPhase = phase;
+              frame.barPhase = phase;
+              return frame;
+            });
+    };
+    subdivided("beat", 4);
+    subdivided("beat", 8);
+    subdivided("downbeat", 2);
+    // An unsupported subdivision reads as the whole pulse, which is what keeps
+    // an older engine and a newer configuration agreeing.
+    subdivided("beat", 3);
+
+    // Subdividing makes a lane commoner, and that is what `strongest` ranks by.
+    const nova::SignalFrame frame = frameAt(0, 0.05, 0, 0, 1);
+    for (const nova::Driver& value :
+         {driver("beat", 1, 0, 4, "beat", 8), driver("beat", 1, 0, 4, "beat", 2),
+          driver("beat"), driver("downbeat", 1, 0, 4, "beat", 4), driver("downbeat")}) {
+      mix(nova::driverPeriodSeconds(value, frame));
+    }
+  }
+
+  // 13. The four combine modes over one pair of lanes: a busy beat and a rare
+  //     every-fourth-downbeat, with deliberately different resting values so
+  //     `override` can be told apart from the rest -- it is the only mode that
+  //     replaces the shared floor rather than building on it.
+  {
+    const std::vector<nova::ScopedLane> layered = {
+        {"defaults", laneOf("a", driver("beat"), {binding("b-a", 3, 5, 0, 1, 0)})},
+        {"override", laneOf("b", driver("downbeat", 4), {binding("b-b", 1, 2, 0, 1, 0)})},
+    };
+    for (nova::CombineMode mode : {nova::CombineMode::Add, nova::CombineMode::Strongest,
+                                   nova::CombineMode::Common, nova::CombineMode::Override}) {
+      sweep(layered, {{"glow", mode}}, 8,
+            [&](int tick) { return frameAt(tick, 0.05, tick, tick, 1); });
+    }
+
+    // A level lane against a pulse. `common` must not let the continuous one
+    // win -- it has no period, so "most frequent" would silence every pulse.
+    const std::vector<nova::ScopedLane> levelled = {
+        {"g", laneOf("level", driver("energy"), {binding("b-level", 0, 2, 0, 0, 0)})},
+        {"g", laneOf("pulse", driver("downbeat", 4), {binding("b-pulse", 0, 10, 0, 1, 0)})},
+    };
+    for (nova::CombineMode mode : {nova::CombineMode::Strongest, nova::CombineMode::Common}) {
+      sweep(levelled, {{"glow", mode}}, 8, [&](int tick) {
+        nova::SignalFrame frame = frameAt(tick, 0.05, tick, tick, 1);
+        frame.energy = 1.0f;
+        return frame;
+      });
+    }
+
+    // The transition axes ignore what the group stored: forced to override, so
+    // an authored `add` cannot sum two modes into a third that means nothing.
+    for (const char* effect : {"__centreTransition", "__centreTransitionAxis",
+                               "__centreTransitionDivisions", "__centreTransitionReturn",
+                               "glow", "__glowBlend"}) {
+      mix(nova::isOverrideOnlyEffect(effect) ? 1.0 : 0.0);
+    }
   }
 
   char buffer[96];

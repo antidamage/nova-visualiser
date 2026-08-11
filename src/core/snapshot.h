@@ -13,8 +13,10 @@
 #include <string>
 #include <vector>
 
+#include "core/centre_image_transition.h"
 #include "core/effect_scale.h"
 #include "core/image.h"
+#include "core/image_fit_reference.h"
 #include "core/signal.h"
 #include "core/vec.h"
 
@@ -59,6 +61,21 @@ struct SceneSnapshot {
   // authored black edge gradients.
   float backgroundHeight = 1.0f / 3.0f;
   float backgroundWidth = 1.0f;
+  // The backdrop's fit, on the same terms as the centre slot's below. These
+  // size whichever backdrop is showing: the background image when the theme
+  // names one, the procedural band when it does not. `backgroundScale`
+  // multiplies in every mode -- that is what makes the backdrop thump.
+  float backgroundScale = 1.0f;
+  ImageFit backgroundFit = ImageFit::Manual;
+  bool backgroundProportional = true;
+  // The colour theme's background image, and the one still leaving during a
+  // change. Null in both is the procedural field: the two are one slot with two
+  // possible occupants, not a picture layered over a field. Drawn inside the
+  // backdrop pass, which is what puts it UNDER the vignette.
+  std::shared_ptr<const DecodedImage> backgroundImage;
+  std::shared_ptr<const DecodedImage> backgroundImageFrom;
+  float backgroundImageFade = 1.0f;
+  CentreTransitionParams backgroundTransition;
   Vec4 vignetteColor{0, 0, 0, 1};
   float vignetteOpacity = 0.96f;
   float vignetteSize = 1.0f;
@@ -75,11 +92,21 @@ struct SceneSnapshot {
   // pointer comparison rather than a hash of several megabytes.
   std::shared_ptr<const DecodedImage> centreImage;
   std::shared_ptr<const DecodedImage> centreImageFrom;
-  // The incoming image's weight, 0 to 1. 1 whenever nothing is cross-fading.
+  // The transition's progress, 0 to 1, already through the ramp. 1 whenever
+  // nothing is changing. For a cross-fade this is the incoming image's weight;
+  // for a flip or a slide it is the position along the geometry.
   float centreImageFade = 1.0f;
-  // How tall the centre image is drawn, as a fraction of the frame. Width
-  // follows from the source's proportions, so the picture is never distorted.
+  // How this change is being made, latched when it started. See
+  // core/centre_image_transition.h.
+  CentreTransitionParams centreTransition;
+  // How big the centre image is drawn, as fractions of the frame. Width is the
+  // authored axis; height is used only under a manual fit with
+  // `centreImageProportional` off, which is what stops the picture being
+  // squashed by default. See core/image_fit_reference.h.
+  float centreImageWidth = 0.33f;
   float centreImageHeight = 0.33f;
+  ImageFit centreImageFit = ImageFit::Manual;
+  bool centreImageProportional = true;
   // Shared by both: the slot is scaled, not whatever happens to be in it.
   float messageScale = 1.0f;
   Vec4 messageColor{1, 1, 1, 1};
