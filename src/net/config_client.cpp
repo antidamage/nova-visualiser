@@ -8,6 +8,7 @@
 
 #include "core/centre_image_reference.h"
 #include "core/json.h"
+#include "core/picture_effects.h"
 #include "gfx/image_decode.h"
 #include "net/http_client.h"
 
@@ -50,17 +51,23 @@ Vec4 colourVector(const json::Value& value) {
 
 // Every driver field is always present on the wire, so an absent block is a
 // plain beat driver rather than an error. `every` is clamped the same way the
-// dashboard clamps it, and `offset` only means anything inside its own cycle.
+// dashboard clamps it, `offset` only means anything inside its own cycle, and
+// `divide` is left as it arrived because `driverDivide` is what decides which
+// values are subdivisions at all.
 Driver driverFrom(const json::Value* value) {
   Driver driver;
   if (value == nullptr) return driver;
   driver.type = stringField(*value, "type", "beat");
-  driver.every = std::max(1, std::min(16, static_cast<int>(numberField(*value, "every", 1))));
+  driver.divide = static_cast<int>(numberField(*value, "divide", 1));
+  // Counting and subdividing are the two directions of one control: a
+  // subdivided driver is always "every one", and its offset is nothing.
+  driver.every = driverDivide(driver) > 1
+                     ? 1
+                     : std::max(1, std::min(16, static_cast<int>(numberField(*value, "every", 1))));
   driver.offset = std::max(
       0, std::min(driver.every - 1, static_cast<int>(numberField(*value, "offset", 0))));
   driver.intervalSeconds = numberField(*value, "intervalSeconds", 4.0);
   driver.cadence = stringField(*value, "cadence", "beat");
-  driver.transitionSeconds = numberField(*value, "transitionSeconds", 0.5);
   return driver;
 }
 
@@ -141,6 +148,8 @@ void ConfigClient::refreshThemeState() {
   }
   const bool paused = value->find("paused") != nullptr &&
                       value->find("paused")->boolean().value_or(false);
+  const bool altActive = value->find("altActive") != nullptr &&
+                         value->find("altActive")->boolean().value_or(false);
   const uint64_t revision = static_cast<uint64_t>(numberField(*value, "revision", 0));
   std::lock_guard<std::mutex> lock(mutex_);
   snapshot_.rotation.selectedEntryId = selectedEntry;
@@ -150,6 +159,41 @@ void ConfigClient::refreshThemeState() {
   if (const json::Value* transition = value->find("transitionSeconds")) {
     snapshot_.rotation.selectedTransitionSeconds = transition->number();
   }
+  // How the change is made, alongside how long it takes. Absent -- an older
+  // dashboard, or a state published before this existed -- leaves the previous
+  // answer standing, which defaults to the cross-fade the picture always had.
+  //
+  // One parse for both slots, because the published shape is identical: the
+  // centre and the backdrop are resolved from separate axes at the same instant
+  // and by the same rule, so they arrive as two objects of the same kind.
+  auto readTransition = [&](const json::Value& shape, CentreTransitionParams& params,
+                            double& attack, double& hold, double& release) {
+    params.mode = centreTransitionFor(numberField(shape, "mode", 0));
+    params.axisRadians = static_cast<float>(
+        numberField(shape, "axisDegrees", 0) * 3.14159265358979323846 / 180.0);
+    params.divisions = static_cast<int>(numberField(shape, "divisions", 0));
+    const json::Value* origin = shape.find("returnFromOrigin");
+    params.returnFromOrigin = origin != nullptr && origin->boolean().value_or(false);
+    attack = numberField(shape, "attackSeconds", 0);
+    hold = numberField(shape, "holdSeconds", 0);
+    release = numberField(shape, "releaseSeconds", 0);
+  };
+  if (const json::Value* shape = value->find("transition")) {
+    readTransition(*shape, snapshot_.rotation.selectedTransition,
+                   snapshot_.rotation.selectedTransitionAttack,
+                   snapshot_.rotation.selectedTransitionHold,
+                   snapshot_.rotation.selectedTransitionRelease);
+  }
+  // A dashboard published before the backdrop had its own transition sends
+  // nothing here, and the previous answer stands -- which defaults to the
+  // cross-fade a backdrop change has always been.
+  if (const json::Value* shape = value->find("backgroundTransition")) {
+    readTransition(*shape, snapshot_.rotation.selectedBackgroundTransition,
+                   snapshot_.rotation.selectedBackgroundTransitionAttack,
+                   snapshot_.rotation.selectedBackgroundTransitionHold,
+                   snapshot_.rotation.selectedBackgroundTransitionRelease);
+  }
+  snapshot_.rotation.altActive = altActive;
   snapshot_.rotation.paused = paused;
   snapshot_.rotation.revision = revision;
 }
@@ -276,32 +320,17 @@ bool ConfigClient::refreshConfiguration() {
   };
 
   // Picture-level effects. Household configuration, declared by no module
-  // manifest, so their declarations are synthesised here and resolved through
-  // exactly the same lanes as every module setting. Seeded at their defaults so
-  // an unbound effect still has a value.
-  next.settings["__messageScale"] = 1.0;
-  // The centre image's base height, as a percentage of the frame. A separate
-  // axis from the scale above: this is how big the image is, that is a
-  // multiplier a driver lane can sweep on top of it.
-  next.settings["__centreHeight"] = kCentreImageDefaultHeightPercent;
-  next.settings["__glowBlur"] = 0.0;
-  // Opacity 0 is the identity, and it is what both engines check to skip the
-  // glow pass entirely.
-  next.settings["__glowOpacity"] = 0.0;
-  // 0 screen, 1 multiply, 2 overlay.
-  next.settings["__glowBlend"] = 0.0;
-  // Degrees of random hue jitter per House Party light. Resolved here rather
-  // than by the dashboard because only this engine holds the spectrum a bass or
-  // energy driver reads; the value rides out on the lighting frame.
-  next.settings["__hueOffset"] = 5.0;
-  // Frame geometry, as a percentage of the render view: the fixed letterbox
-  // these replaced, so an unbound picture is the one that was always drawn.
-  next.settings["__bgHeight"] = 33.0;
-  next.settings["__bgWidth"] = 100.0;
-  next.settings["__vignetteOpacity"] = 96.0;
-  next.settings["__vignetteSize"] = 1.0;
-  // 0 linear, 1 screen, 2 overlay, 3 multiply. Linear is the original term.
-  next.settings["__sceneBlend"] = 0.0;
+  // manifest, so their declarations are synthesised rather than parsed and
+  // resolved through exactly the same lanes as every module setting. Seeded at
+  // their defaults so an unbound effect still has a value.
+  //
+  // From `core/picture_effects.h`, which the engine's lane declarations read
+  // too: this seed doubles as the parse-time test for "an effect this build
+  // knows about" a few hundred lines below, so an effect present in one list
+  // and missing from the other is a control that silently does nothing.
+  for (const PictureEffect& effect : kPictureEffects) {
+    next.settings[effect.id] = effect.defaultValue;
+  }
 
   if (next.activeModuleId.empty() || next.activeModuleVersion.empty()) {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -380,6 +409,10 @@ bool ConfigClient::refreshConfiguration() {
   // A theme may also supply the picture's centrepiece. Resolved alongside the
   // palette so a rotation entry carries both, and the two can never tear.
   std::unordered_map<std::string, std::shared_ptr<const DecodedImage>> imagesByThemeId;
+  // The theme's backdrop, resolved from the same library and by the same rule.
+  // A theme with no entry here draws the procedural field, so an absent id is
+  // simply an absent entry rather than a sentinel.
+  std::unordered_map<std::string, std::shared_ptr<const DecodedImage>> backgroundsByThemeId;
   if (const json::Value* themes = config->find("colorThemes")) {
     if (const json::Array* items = themes->array()) {
       for (const json::Value& theme : *items) {
@@ -393,6 +426,9 @@ bool ConfigClient::refreshConfiguration() {
         if (auto image = imageForId(stringField(theme, "imageId"))) {
           imagesByThemeId.emplace(themeId, std::move(image));
         }
+        if (auto background = imageForId(stringField(theme, "backgroundImageId"))) {
+          backgroundsByThemeId.emplace(themeId, std::move(background));
+        }
         palettesByThemeId.emplace(themeId, std::move(palette));
       }
     }
@@ -400,6 +436,11 @@ bool ConfigClient::refreshConfiguration() {
   auto imageForTheme = [&](const std::string& themeId) -> std::shared_ptr<const DecodedImage> {
     const auto found = imagesByThemeId.find(themeId);
     return found != imagesByThemeId.end() ? found->second : nullptr;
+  };
+  auto backgroundForTheme = [&](const std::string& themeId)
+      -> std::shared_ptr<const DecodedImage> {
+    const auto found = backgroundsByThemeId.find(themeId);
+    return found != backgroundsByThemeId.end() ? found->second : nullptr;
   };
 
   if (const json::Value* colorGroups = config->find("colorGroups")) {
@@ -418,6 +459,7 @@ bool ConfigClient::refreshConfiguration() {
           ColorGroupRotation::Entry resolved;
           resolved.id = stringField(entry, "id");
           resolved.themeId = stringField(entry, "themeId");
+          resolved.altThemeId = stringField(entry, "altThemeId");
           if (const json::Value* ids = entry.find("settingsGroupIds")) {
             if (const json::Array* idItems = ids->array()) {
               for (const json::Value& id : *idItems) {
@@ -426,9 +468,24 @@ bool ConfigClient::refreshConfiguration() {
             }
           }
           auto palette = palettesByThemeId.find(resolved.themeId);
-          next.rotation.palettes.push_back(
-              palette != palettesByThemeId.end() ? palette->second : basePalette);
+          const Palette& own =
+              palette != palettesByThemeId.end() ? palette->second : basePalette;
+          next.rotation.palettes.push_back(own);
           next.rotation.images.push_back(imageForTheme(resolved.themeId));
+          next.rotation.backgrounds.push_back(backgroundForTheme(resolved.themeId));
+          // No alt link, or one naming a theme this module's library does not
+          // hold, means this entry has nothing to switch to: the alt column is
+          // its own colours, so the alt state passes it by without blanking it.
+          auto altPalette = resolved.altThemeId.empty()
+                                ? palettesByThemeId.end()
+                                : palettesByThemeId.find(resolved.altThemeId);
+          const bool hasAlt = altPalette != palettesByThemeId.end();
+          next.rotation.altPalettes.push_back(hasAlt ? altPalette->second : own);
+          next.rotation.altImages.push_back(
+              hasAlt ? imageForTheme(resolved.altThemeId) : imageForTheme(resolved.themeId));
+          next.rotation.altBackgrounds.push_back(hasAlt
+              ? backgroundForTheme(resolved.altThemeId)
+              : backgroundForTheme(resolved.themeId));
           next.rotation.entries.push_back(std::move(resolved));
         }
         // Seed with the first entry so a cold start is never colourless.
@@ -456,6 +513,12 @@ bool ConfigClient::refreshConfiguration() {
       next.rotation.entries.push_back(std::move(entry));
       next.rotation.palettes.push_back(solo->second);
       next.rotation.images.push_back(imageForTheme(soloThemeId));
+      next.rotation.backgrounds.push_back(backgroundForTheme(soloThemeId));
+      // A solo is "hold it here", so the alt column is deliberately the same
+      // theme: flipping the alt state must not move a picture that is held.
+      next.rotation.altPalettes.push_back(solo->second);
+      next.rotation.altImages.push_back(imageForTheme(soloThemeId));
+      next.rotation.altBackgrounds.push_back(backgroundForTheme(soloThemeId));
       next.rotation.pinnedEntryId = kSoloEntryId;
       next.palette = solo->second;
     }
@@ -477,9 +540,14 @@ bool ConfigClient::refreshConfiguration() {
         if (const json::Value* combine = raw.find("combine")) {
           if (const json::Object* modes = combine->object()) {
             for (const auto& [effect, mode] : *modes) {
-              group.combine[effect] = mode.stringOr("add") == "strongest"
-                                          ? CombineMode::Strongest
-                                          : CombineMode::Add;
+              // Anything unrecognised reads as Add, which is what every effect
+              // did before combine modes existed: a config written by a newer
+              // dashboard degrades rather than being rejected.
+              const std::string name = mode.stringOr("add");
+              if (name == "strongest") group.combine[effect] = CombineMode::Strongest;
+              else if (name == "common") group.combine[effect] = CombineMode::Common;
+              else if (name == "override") group.combine[effect] = CombineMode::Override;
+              else group.combine[effect] = CombineMode::Add;
             }
           }
         }
@@ -526,6 +594,11 @@ bool ConfigClient::refreshConfiguration() {
                     optional("attackSeconds", binding.attackSeconds, binding.hasAttack);
                     optional("holdSeconds", binding.holdSeconds, binding.hasHold);
                     optional("releaseSeconds", binding.releaseSeconds, binding.hasRelease);
+                    // Sparse like everything else: absent, or anything that is
+                    // not literally true, reads as off.
+                    if (const json::Value* random = rawBinding.find("randomValue")) {
+                      binding.randomValue = random->boolean().value_or(false);
+                    }
                     if (const json::Value* params = rawBinding.find("params")) {
                       if (const json::Object* values = params->object()) {
                         for (const auto& [key, value] : *values) {
@@ -581,6 +654,7 @@ bool ConfigClient::refreshConfiguration() {
     next.rotation.selectedGroupId = snapshot_.rotation.selectedGroupId;
     next.rotation.selectedSettingsGroupIds = snapshot_.rotation.selectedSettingsGroupIds;
     next.rotation.selectedTransitionSeconds = snapshot_.rotation.selectedTransitionSeconds;
+    next.rotation.altActive = snapshot_.rotation.altActive;
     next.rotation.paused = snapshot_.rotation.paused;
     next.rotation.revision = snapshot_.rotation.revision;
     snapshot_ = std::move(next);
@@ -591,6 +665,9 @@ bool ConfigClient::refreshConfiguration() {
     {
       std::unordered_set<std::string> live;
       for (const auto& image : snapshot_.rotation.images) {
+        if (image) live.insert(image->sourceUrl);
+      }
+      for (const auto& image : snapshot_.rotation.altImages) {
         if (image) live.insert(image->sourceUrl);
       }
       for (auto entry = imageCache_.begin(); entry != imageCache_.end();) {

@@ -70,16 +70,33 @@ struct ColorGroupRotation {
   struct Entry {
     std::string id;
     std::string themeId;
+    // A link to a second colour theme, shown instead of `themeId` while Nova
+    // has the household in alt. Empty when this entry has no alternative, in
+    // which case it keeps its own colours and the alt state simply passes it by.
+    std::string altThemeId;
     // Applied in order: their lanes stack, their scalars layer.
     std::vector<std::string> settingsGroupIds;
   };
   // Fully resolved palettes, parallel to `entries`: module slot defaults with
   // the entry's theme colours applied over them.
   std::vector<Palette> palettes;
+  // The same, resolved through each entry's alt link. Parallel to `entries` and
+  // equal to `palettes` wherever an entry has no alt, so selecting a column is
+  // an index rather than a branch per slot. Resolved here, at config parse,
+  // because the theme library is only in scope while the configuration is
+  // being read.
+  std::vector<Palette> altPalettes;
   // The entry's theme's centre image, parallel to `entries` and null where the
   // theme supplies none. Decoded once and shared, so moving between two entries
   // that name the same image is a pointer comparison and no re-upload.
   std::vector<std::shared_ptr<const DecodedImage>> images;
+  // The alt column's centre images, parallel to `images` for the same reason.
+  std::vector<std::shared_ptr<const DecodedImage>> altImages;
+  // The entry's theme's BACKGROUND image, and the alt column's, on exactly the
+  // same terms. Null where the theme names none, which is what makes the
+  // procedural backdrop draw.
+  std::vector<std::shared_ptr<const DecodedImage>> backgrounds;
+  std::vector<std::shared_ptr<const DecodedImage>> altBackgrounds;
   std::vector<Entry> entries;
   std::string groupId;
   // The configuration editor publishes the entry it is previewing. tvOS pins to
@@ -93,6 +110,25 @@ struct ColorGroupRotation {
   std::string selectedGroupId;
   std::vector<std::string> selectedSettingsGroupIds;
   std::optional<double> selectedTransitionSeconds;
+  // How the centre image changes, and the ramp that shapes it. Published by the
+  // dashboard already resolved from the settings groups that were in effect when
+  // the change fired -- the initiator owns the transition, so this side never
+  // resolves it and never re-reads it mid-flight.
+  CentreTransitionParams selectedTransition;
+  double selectedTransitionAttack = 0.0;
+  double selectedTransitionHold = 0.0;
+  double selectedTransitionRelease = 0.6;
+  // The background image's own, published alongside and resolved the same way.
+  // Separate from the centre's because the two slots change at the same moment
+  // but run independently.
+  CentreTransitionParams selectedBackgroundTransition;
+  double selectedBackgroundTransitionAttack = 0.0;
+  double selectedBackgroundTransitionHold = 0.0;
+  double selectedBackgroundTransitionRelease = 0.6;
+  // Nova's household alt state, arriving on the same faster theme poll. Global
+  // rather than per entry: it survives the rotation moving on, so an entry with
+  // no alt shows its own colours without turning the state off.
+  bool altActive = false;
   bool paused = false;
   uint64_t revision = 0;
 };

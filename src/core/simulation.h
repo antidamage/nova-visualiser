@@ -23,8 +23,10 @@
 #include <unordered_set>
 #include <vector>
 
+#include "core/centre_image_transition.h"
 #include "core/expression.h"
 #include "core/image.h"
+#include "core/image_fit_reference.h"
 #include "core/module.h"
 #include "core/palette.h"
 #include "core/signal.h"
@@ -45,10 +47,19 @@ struct SimulationInput {
   // The live colour theme's centre image, already decoded. A non-blank message
   // wins over it; that is `Simulation::submit`'s decision.
   std::shared_ptr<const DecodedImage> themeImage;
-  // The centre slot's two size axes. `centreHeight` is how tall the image is as
-  // a percentage of the frame; `messageScale` is the driven multiplier on top,
-  // shared with the message.
+  // The live colour theme's BACKGROUND image, already decoded, or null when it
+  // names none. Non-null replaces the procedural backdrop field entirely; the
+  // two are one slot with two possible occupants rather than layers.
+  std::shared_ptr<const DecodedImage> backgroundImage;
+  std::shared_ptr<const DecodedImage> backgroundImagePrev;
+  // The centre slot's size. `centreWidth` is the authored axis as a percentage
+  // of the frame and `centreHeight` the other one, used only under a manual fit
+  // with `centreProportional` off; `messageScale` is the driven multiplier on
+  // top, shared with the message. See core/image_fit_reference.h.
+  double centreWidth = 33.0;
   double centreHeight = 33.0;
+  ImageFit centreFit = ImageFit::Manual;
+  bool centreProportional = true;
   double messageScale = 1.0;
   // Final glow overlay. Blur amount 0-20 and opacity 0-100 as authored; the
   // blend mode is Photoshop's, "screen", "multiply" or "overlay".
@@ -65,10 +76,40 @@ struct SimulationInput {
   // multiplier: it is allowed past 1, which is how it closes the band to a slit.
   double backgroundHeight = 33.0;
   double backgroundWidth = 100.0;
+  // The backdrop's fit, on exactly the same terms as the centre's above. These
+  // size whichever backdrop is showing: with a background image they fit the
+  // image, and with none they size the procedural band as they always have.
+  // `backgroundScale` multiplies in every mode, which is what lets the backdrop
+  // thump on the beat.
+  double backgroundScale = 1.0;
+  ImageFit backgroundFit = ImageFit::Manual;
+  bool backgroundProportional = true;
   double vignetteOpacity = 96.0;
   double vignetteSize = 1.0;
   SceneBlendMode sceneBlendMode = SceneBlendMode::Linear;
+  // The whole length of a change, and the ramp's shape within it. The duration
+  // stays separate because the palette's exponential chase reads it and nothing
+  // else -- a chase has no phases.
   double transitionDuration = 0.6;
+  // The transition's motion profile: attack eases in, hold is the flat middle,
+  // release eases out, and their sum is `transitionDuration`. The defaults are
+  // the all-in-the-release shape a configuration written before the ramp meant
+  // this already had.
+  double transitionAttack = 0.0;
+  double transitionHold = 0.0;
+  double transitionRelease = 0.6;
+  // How the centre image changes. Latched by `Simulation::submit` at the moment
+  // the image actually changes, never read live -- the initiator owns the
+  // transition, and the entry being arrived at has no say in it.
+  CentreTransitionParams centreTransition;
+  // The background image's own, resolved from its own four axes at the same
+  // instant and by the same rule. Separate because the two slots run
+  // concurrently and independently: the backdrop can dissolve while the
+  // centrepiece slides.
+  CentreTransitionParams backgroundTransition;
+  double backgroundTransitionAttack = 0.0;
+  double backgroundTransitionHold = 0.0;
+  double backgroundTransitionRelease = 0.6;
   bool transitionPaused = false;
   int reloadGeneration = 0;
 };
@@ -269,16 +310,37 @@ class Simulation {
   SignalFrame signal_ = SignalFrame::idle();
   std::string message_;
   // The centre slot. `centreImage_` is what should be on screen now and
-  // `centreImagePrev_` what is fading out behind it; `centreImageFade_` is the
-  // incoming one's weight, ramped linearly over the rotation's transition. A
-  // finished fade releases the outgoing image, which is why this is a ramp and
-  // not the exponential chase the palette uses -- a chase never arrives.
+  // `centreImagePrev_` what is leaving; `centreImageFade_` is the transition's
+  // progress, 0 to 1, over the rotation's own transition. A finished transition
+  // releases the outgoing image, which is why this is a ramp and not the
+  // exponential chase the palette uses -- a chase never arrives.
   std::shared_ptr<const DecodedImage> centreImage_;
   std::shared_ptr<const DecodedImage> centreImagePrev_;
   double centreImageFade_ = 1.0;
   double centreImageFadeSeconds_ = 0.0;
+  // Latched when the image changed, and held until the transition finishes: a
+  // parameter edited mid-flight lands on the NEXT change rather than tearing
+  // the one already running.
+  CentreTransitionParams centreTransitionLatched_;
+  double centreTransitionAttack_ = 0.0;
+  double centreTransitionHold_ = 0.0;
+  double centreTransitionRelease_ = 0.6;
   double centreHeight_ = 0.33;
+  double centreWidth_ = 0.33;
+  ImageFit centreFit_ = ImageFit::Manual;
+  bool centreProportional_ = true;
   double messageScale_ = 1.0;
+  // The backdrop slot, mirroring the centre's above: what is showing, what is
+  // leaving, and how far through the change it is. Null in both means the
+  // procedural field is the backdrop.
+  std::shared_ptr<const DecodedImage> backgroundImage_;
+  std::shared_ptr<const DecodedImage> backgroundImagePrev_;
+  double backgroundImageFade_ = 1.0;
+  double backgroundImageFadeSeconds_ = 0.0;
+  CentreTransitionParams backgroundTransitionLatched_;
+  double backgroundTransitionAttack_ = 0.0;
+  double backgroundTransitionHold_ = 0.0;
+  double backgroundTransitionRelease_ = 0.6;
   double glowBlurAmount_ = 0.0;
   double glowOpacity_ = 0.0;
   double glowOverdrive_ = 1.0;
@@ -286,6 +348,9 @@ class Simulation {
   GlowBlendMode glowBlendMode_ = GlowBlendMode::Screen;
   double backgroundHeight_ = 1.0 / 3.0;
   double backgroundWidth_ = 1.0;
+  double backgroundScale_ = 1.0;
+  ImageFit backgroundFit_ = ImageFit::Manual;
+  bool backgroundProportional_ = true;
   double vignetteOpacity_ = 0.96;
   double vignetteSize_ = 1.0;
   SceneBlendMode sceneBlendMode_ = SceneBlendMode::Linear;

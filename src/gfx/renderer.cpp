@@ -150,6 +150,17 @@ bool Renderer::initialise(int width, int height, std::string& error) {
   fluidUniforms_.apexGlow = glGetUniformLocation(fluidProgram_, "apexGlow");
   fluidUniforms_.blobScale = glGetUniformLocation(fluidProgram_, "blobScale");
   fluidUniforms_.blobSoftness = glGetUniformLocation(fluidProgram_, "blobSoftness");
+  fluidUniforms_.hasImage = glGetUniformLocation(fluidProgram_, "hasImage");
+  fluidUniforms_.hasImageFrom = glGetUniformLocation(fluidProgram_, "hasImageFrom");
+  fluidUniforms_.imageHalfExtentTo = glGetUniformLocation(fluidProgram_, "imageHalfExtentTo");
+  fluidUniforms_.imageHalfExtentFrom = glGetUniformLocation(fluidProgram_, "imageHalfExtentFrom");
+  fluidUniforms_.imageProgress = glGetUniformLocation(fluidProgram_, "imageProgress");
+  fluidUniforms_.imageMode = glGetUniformLocation(fluidProgram_, "imageMode");
+  fluidUniforms_.imageAxisRadians = glGetUniformLocation(fluidProgram_, "imageAxisRadians");
+  fluidUniforms_.imageSegments = glGetUniformLocation(fluidProgram_, "imageSegments");
+  fluidUniforms_.imageReturnOrigin = glGetUniformLocation(fluidProgram_, "imageReturnOrigin");
+  fluidUniforms_.frameAspect = glGetUniformLocation(fluidProgram_, "frameAspect");
+  fluidUniforms_.imageBackdrop = glGetUniformLocation(fluidProgram_, "imageBackdrop");
   downsampleTexel_ = glGetUniformLocation(downsampleProgram_, "texelSize");
   upsampleTexel_ = glGetUniformLocation(upsampleProgram_, "texelSize");
   upsampleRadius_ = glGetUniformLocation(upsampleProgram_, "radius");
@@ -158,8 +169,13 @@ bool Renderer::initialise(int width, int height, std::string& error) {
   textHasColor_ = glGetUniformLocation(textProgram_, "hasColor");
   centreImageExtentTo_ = glGetUniformLocation(centreImageProgram_, "halfExtentTo");
   centreImageExtentFrom_ = glGetUniformLocation(centreImageProgram_, "halfExtentFrom");
-  centreImageFadeUniform_ = glGetUniformLocation(centreImageProgram_, "fade");
+  centreImageFadeUniform_ = glGetUniformLocation(centreImageProgram_, "progress");
   centreImageHasFrom_ = glGetUniformLocation(centreImageProgram_, "hasFrom");
+  centreImageMode_ = glGetUniformLocation(centreImageProgram_, "mode");
+  centreImageAxis_ = glGetUniformLocation(centreImageProgram_, "axisRadians");
+  centreImageSegments_ = glGetUniformLocation(centreImageProgram_, "segments");
+  centreImageReturnOrigin_ = glGetUniformLocation(centreImageProgram_, "returnFromOrigin");
+  centreImageFrameAspect_ = glGetUniformLocation(centreImageProgram_, "frameAspect");
   glowBlurAxisTexel_ = glGetUniformLocation(glowBlurProgram_, "axisTexel");
   glowBlurSigma_ = glGetUniformLocation(glowBlurProgram_, "sigma");
   glowOverlayOpacity_ = glGetUniformLocation(glowOverlayProgram_, "opacity");
@@ -184,6 +200,8 @@ bool Renderer::initialise(int width, int height, std::string& error) {
       fluidUniforms_.vignetteSize < 0 || textColor_ < 0 ||
       textScale_ < 0 || centreImageExtentTo_ < 0 || centreImageExtentFrom_ < 0 ||
       centreImageFadeUniform_ < 0 || centreImageHasFrom_ < 0 ||
+      centreImageMode_ < 0 || centreImageAxis_ < 0 || centreImageSegments_ < 0 ||
+      centreImageReturnOrigin_ < 0 || centreImageFrameAspect_ < 0 ||
       glowBlurAxisTexel_ < 0 || glowBlurSigma_ < 0 ||
       glowOverlayOpacity_ < 0 || glowOverlayOverdrive_ < 0 || glowOverlayClamped_ < 0 ||
       glowOverlayBlendMode_ < 0) {
@@ -342,8 +360,48 @@ void Renderer::renderFluidBackground(double time) {
   glUniform1f(fluidUniforms_.blobScale, fluid_.blobScale);
   glUniform1f(fluidUniforms_.blobSoftness, fluid_.blobSoftness);
 
+  // The background image, when the theme names one. Bound to units 0 and 1 --
+  // the blob path samples nothing, so there is no conflict, and the shader's
+  // `hasImage` is what decides which of the two backdrops is drawn.
+  const bool hasImage = bindImagePlane(backgroundPlanes_, 0, 0, fluid_.image);
+  const bool hasImageFrom = bindImagePlane(backgroundPlanes_, 1, 1, fluid_.imageFrom);
+  // The frame's aspect, not the band's: with an image there is no band, and the
+  // fit is stated against the whole picture.
+  const float frameAspect = renderHeight_ > 0
+      ? static_cast<float>(renderWidth_) / static_cast<float>(renderHeight_)
+      : 0.0f;
+  auto extentOf = [&](const std::shared_ptr<const DecodedImage>& image) {
+    if (!image || image->height <= 0) return ImageExtent{};
+    const float aspect = static_cast<float>(image->width) / static_cast<float>(image->height);
+    return imageHalfExtent(frameAspect, aspect, fluid_.widthFraction, fluid_.heightFraction,
+                           fluid_.scale, fluid_.fit, fluid_.proportional);
+  };
+  const ImageExtent to = extentOf(fluid_.image);
+  const ImageExtent from = extentOf(fluid_.imageFrom);
+  glUniform1i(fluidUniforms_.hasImage, hasImage ? 1 : 0);
+  glUniform1i(fluidUniforms_.hasImageFrom, hasImageFrom ? 1 : 0);
+  glUniform2f(fluidUniforms_.imageHalfExtentTo, to.halfWidth, to.halfHeight);
+  glUniform2f(fluidUniforms_.imageHalfExtentFrom, from.halfWidth, from.halfHeight);
+  glUniform1f(fluidUniforms_.imageProgress, fluid_.imageFade);
+  glUniform1i(fluidUniforms_.imageMode, static_cast<int>(fluid_.imageTransition.mode));
+  glUniform1f(fluidUniforms_.imageAxisRadians, fluid_.imageTransition.axisRadians);
+  // Divisions become segments here so the shader never has to add one on the
+  // hot path, exactly as the centre pass does.
+  glUniform1i(fluidUniforms_.imageSegments,
+              std::max(1, std::min(kCentreTransitionMaxDivisions,
+                                   fluid_.imageTransition.divisions) + 1));
+  glUniform1i(fluidUniforms_.imageReturnOrigin,
+              fluid_.imageTransition.returnFromOrigin ? 1 : 0);
+  glUniform1f(fluidUniforms_.frameAspect, frameAspect);
+  // What shows where the image does not cover: the theme's backdrop colour, so
+  // a fitted image smaller than the frame sits on the palette rather than on a
+  // hole the composite would have to invent something for.
+  glUniform3f(fluidUniforms_.imageBackdrop, fluid_.background.x, fluid_.background.y,
+              fluid_.background.z);
+
   glBindVertexArray(vao_);
   glDrawArrays(GL_TRIANGLES, 0, 3);
+  glActiveTexture(GL_TEXTURE0);
 }
 
 void Renderer::updateMessageTexture(const std::string& message) {
@@ -412,28 +470,32 @@ void Renderer::renderMessage(const SceneSnapshot& snapshot) {
   glActiveTexture(GL_TEXTURE0);
 }
 
-bool Renderer::bindCentreImage(int slot, const std::shared_ptr<const DecodedImage>& image) {
-  glActiveTexture(GL_TEXTURE0 + static_cast<uint32_t>(slot));
+// `slot` is which plane of the pair (incoming or leaving); `unit` is the
+// texture unit the shader samples it from. They were the same number while only
+// the centre had planes, and they are not once the backdrop has its own pair.
+bool Renderer::bindImagePlane(ImagePlanes& planes, int slot, int unit,
+                              const std::shared_ptr<const DecodedImage>& image) {
+  glActiveTexture(GL_TEXTURE0 + static_cast<uint32_t>(unit));
   if (!image || image->width <= 0 || image->height <= 0) {
     // Still bind something: a sampler left pointing at a deleted or unwritten
     // texture is undefined, and the shader's own extent check is what actually
     // stops the plane being drawn.
     glBindTexture(GL_TEXTURE_2D, messageTexture_);
-    cachedCentreImages_[static_cast<size_t>(slot)].reset();
+    planes.cached[static_cast<size_t>(slot)].reset();
     return false;
   }
 
   const size_t index = static_cast<size_t>(slot);
-  if (cachedCentreImages_[index] == image) {
-    glBindTexture(GL_TEXTURE_2D, centreImageTextures_[index]);
+  if (planes.cached[index] == image) {
+    glBindTexture(GL_TEXTURE_2D, planes.textures[index]);
     return true;
   }
 
   // Reallocated per image rather than kept at a fixed size: these are sized to
   // the picture, not to the frame, and glTexStorage2D is immutable.
-  if (centreImageTextures_[index] != 0) glDeleteTextures(1, &centreImageTextures_[index]);
-  glGenTextures(1, &centreImageTextures_[index]);
-  glBindTexture(GL_TEXTURE_2D, centreImageTextures_[index]);
+  if (planes.textures[index] != 0) glDeleteTextures(1, &planes.textures[index]);
+  glGenTextures(1, &planes.textures[index]);
+  glBindTexture(GL_TEXTURE_2D, planes.textures[index]);
   glTexStorage2D(GL_TEXTURE_2D, 1, GL_RGBA8, image->width, image->height);
   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
@@ -442,7 +504,7 @@ bool Renderer::bindCentreImage(int slot, const std::shared_ptr<const DecodedImag
   glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
   glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, image->width, image->height, GL_RGBA,
                   GL_UNSIGNED_BYTE, image->rgba.data());
-  cachedCentreImages_[index] = image;
+  planes.cached[index] = image;
   return true;
 }
 
@@ -450,26 +512,27 @@ bool Renderer::bindCentreImage(int slot, const std::shared_ptr<const DecodedImag
 // therefore before the glow overlay, so an image blooms with the rest of the
 // picture exactly as the text does.
 void Renderer::renderCentreImage(const SceneSnapshot& snapshot) {
-  const bool hasTo = bindCentreImage(0, snapshot.centreImage);
-  const bool hasFrom = bindCentreImage(1, snapshot.centreImageFrom);
+  const bool hasTo = bindImagePlane(centrePlanes_, 0, 0, snapshot.centreImage);
+  const bool hasFrom = bindImagePlane(centrePlanes_, 1, 1, snapshot.centreImageFrom);
   if (!hasTo && !hasFrom) {
     glActiveTexture(GL_TEXTURE0);
     return;
   }
 
-  // Contain-fit and scale come from the shared reference header rather than
-  // being worked out in the shader, so the conformance corpus can lock them.
+  // The fit comes from the shared reference header rather than being worked out
+  // in the shader, so the conformance corpus can lock it.
   const float frameAspect = renderHeight_ > 0
       ? static_cast<float>(renderWidth_) / static_cast<float>(renderHeight_)
       : 0.0f;
   auto extentOf = [&](const std::shared_ptr<const DecodedImage>& image) {
-    if (!image || image->height <= 0) return CentreImageExtent{};
+    if (!image || image->height <= 0) return ImageExtent{};
     const float aspect = static_cast<float>(image->width) / static_cast<float>(image->height);
-    return centreImageHalfExtent(frameAspect, aspect, snapshot.centreImageHeight,
-                                 snapshot.messageScale);
+    return imageHalfExtent(frameAspect, aspect, snapshot.centreImageWidth,
+                           snapshot.centreImageHeight, snapshot.messageScale,
+                           snapshot.centreImageFit, snapshot.centreImageProportional);
   };
-  const CentreImageExtent to = extentOf(snapshot.centreImage);
-  const CentreImageExtent from = extentOf(snapshot.centreImageFrom);
+  const ImageExtent to = extentOf(snapshot.centreImage);
+  const ImageExtent from = extentOf(snapshot.centreImageFrom);
 
   glEnable(GL_BLEND);
   glUseProgram(centreImageProgram_);
@@ -477,6 +540,16 @@ void Renderer::renderCentreImage(const SceneSnapshot& snapshot) {
   glUniform2f(centreImageExtentFrom_, from.halfWidth, from.halfHeight);
   glUniform1f(centreImageFadeUniform_, snapshot.centreImageFade);
   glUniform1i(centreImageHasFrom_, hasFrom ? 1 : 0);
+  // The latched transition, exactly as the simulation recorded it when the
+  // change began. Divisions become segments here so the shader never has to add
+  // one on the hot path.
+  const CentreTransitionParams& transition = snapshot.centreTransition;
+  glUniform1i(centreImageMode_, static_cast<int>(transition.mode));
+  glUniform1f(centreImageAxis_, transition.axisRadians);
+  glUniform1i(centreImageSegments_,
+              std::max(1, std::min(kCentreTransitionMaxDivisions, transition.divisions) + 1));
+  glUniform1i(centreImageReturnOrigin_, transition.returnFromOrigin ? 1 : 0);
+  glUniform1f(centreImageFrameAspect_, frameAspect);
   // Both planes are premultiplied at decode time.
   glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
   glBindVertexArray(vao_);
@@ -1001,12 +1074,14 @@ void Renderer::shutdown() {
   messageColorTexture_ = 0;
   messageHasColor_ = false;
   cachedMessage_.clear();
-  for (size_t slot = 0; slot < centreImageTextures_.size(); ++slot) {
-    if (centreImageTextures_[slot] != 0) glDeleteTextures(1, &centreImageTextures_[slot]);
-    centreImageTextures_[slot] = 0;
-    // Cleared too: the cached pointer is what says "this texture already holds
-    // that image", and the texture it referred to has just gone.
-    cachedCentreImages_[slot].reset();
+  for (ImagePlanes* planes : {&centrePlanes_, &backgroundPlanes_}) {
+    for (size_t slot = 0; slot < planes->textures.size(); ++slot) {
+      if (planes->textures[slot] != 0) glDeleteTextures(1, &planes->textures[slot]);
+      planes->textures[slot] = 0;
+      // Cleared too: the cached pointer is what says "this texture already
+      // holds that image", and the texture it referred to has just gone.
+      planes->cached[slot].reset();
+    }
   }
   if (glowTexture_ != 0) glDeleteTextures(1, &glowTexture_);
   for (size_t slot = 0; slot < glowBlurTextures_.size(); ++slot) {

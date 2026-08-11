@@ -15,6 +15,7 @@
 #include "core/centre_image_reference.h"
 #include "core/effect_scale.h"
 #include "core/json.h"
+#include "core/picture_effects.h"
 #include "net/http_client.h"
 
 namespace nova::service {
@@ -231,50 +232,22 @@ void Engine::applyControlLanes(
   if (!snapshot.module) return;
 
   // Picture-level effects: household configuration that belongs to the frame
-  // rather than to any one module, so their declarations live here. Mirrors
+  // rather than to any one module. Their ranges come from
+  // `core/picture_effects.h`, which the config client also seeds its settings
+  // map from -- one table, because a range declared here for an effect the
+  // parse does not know about is a control that resolves to nothing. Mirrors
   // PHONOSCOPE_PICTURE_EFFECTS in the dashboard and the private settings in
   // PhonoscopeStore.swift; the three must agree on every range.
   std::unordered_map<std::string, EffectDeclaration> declarations;
-  auto declarePrivate = [&](const char* id, double min, double max, double step, double value) {
+  for (const PictureEffect& effect : kPictureEffects) {
     EffectDeclaration declaration;
-    declaration.id = id;
-    declaration.min = min;
-    declaration.max = max;
-    declaration.step = step;
-    declaration.defaultValue = value;
-    declarations[id] = declaration;
-  };
-  declarePrivate("__messageScale", 0.1, 5.0, 0.1, 1.0);
-  // The centre image's base height, as a percentage of the frame. A separate
-  // axis from the scale above: this is how big the image is, that is a
-  // multiplier on top of it.
-  declarePrivate("__centreHeight", 0.0, 100.0, 1.0, kCentreImageDefaultHeightPercent);
-  declarePrivate("__glowBlur", 0.0, 20.0, 0.1, 0.0);
-  declarePrivate("__glowOpacity", 0.0, 100.0, 1.0, 0.0);
-  // 1 is the identity: the glow is used exactly as blurred.
-  declarePrivate("__glowOverdrive", 1.0, 10.0, 0.1, 1.0);
-  // 0/1: clamped by default, which is the display-referred behaviour.
-  declarePrivate("__glowClamp", 0.0, 1.0, 1.0, 1.0);
-  // 0 screen, 1 multiply, 2 overlay, snapped by `glowBlendModeFor`. A step of 1
-  // keeps every authored endpoint on a real mode.
-  declarePrivate("__glowBlend", 0.0, static_cast<double>(kGlowBlendModeCount - 1), 1.0, 0.0);
-  declarePrivate("__hueOffset", 0.0, 180.0, 1.0, 5.0);
-  // Frame geometry, as a PERCENTAGE of the render view. The defaults are the
-  // fixed letterbox these replaced: a centred band one third high and full
-  // width. Authored 0-100 because "33%" is what the control means; the divide by
-  // 100 happens once, where the value is clamped in Simulation::submit, so the
-  // snapshot, the shaders and the recorded band digests all stay in unit space.
-  declarePrivate("__bgHeight", 0.0, 100.0, 1.0, 33.0);
-  declarePrivate("__bgWidth", 0.0, 100.0, 1.0, 100.0);
-  // Vignette. 96% and 1.0 are the authored `PhonoscopeEdgeVignette` exactly, so
-  // an undriven frame is the one that was always drawn. Size can go past 1 --
-  // that is how the vignette closes the band down to a slit -- and stays a
-  // multiplier rather than a percentage for exactly that reason.
-  declarePrivate("__vignetteOpacity", 0.0, 100.0, 1.0, 96.0);
-  declarePrivate("__vignetteSize", 0.0, 3.0, 0.05, 1.0);
-  // 0 linear, 1 screen, 2 overlay, 3 multiply, snapped by `sceneBlendModeFor`.
-  // Linear is the original composite term and so the default.
-  declarePrivate("__sceneBlend", 0.0, static_cast<double>(kSceneBlendModeCount - 1), 1.0, 0.0);
+    declaration.id = effect.id;
+    declaration.min = effect.min;
+    declaration.max = effect.max;
+    declaration.step = effect.step;
+    declaration.defaultValue = effect.defaultValue;
+    declarations[effect.id] = declaration;
+  }
 
   for (const ModuleSetting& setting : snapshot.module->settings()) {
     if (setting.updateMode == "structural") continue;
@@ -425,14 +398,34 @@ void Engine::publishSimulationInput() {
 
     if (entryIndex_ < rotation.entries.size()) {
       currentEntryId_ = rotation.entries[entryIndex_].id;
-      currentThemeId_ = rotation.entries[entryIndex_].themeId;
+      // Reported as the theme actually on screen, alt included: this id is what
+      // the diagnostics endpoint and House Party telemetry name.
+      const net::ColorGroupRotation::Entry& showing = rotation.entries[entryIndex_];
+      currentThemeId_ = rotation.altActive && !showing.altThemeId.empty()
+                            ? showing.altThemeId
+                            : showing.themeId;
     }
-    input.palette = rotation.palettes[entryIndex_];
+    // Nova's household alt state selects the column; the entry selects the row.
+    // Both columns are fully resolved at config parse and an entry with no alt
+    // has the same palette in both, so this cannot show a hole.
+    const bool useAlt = rotation.altActive &&
+                        entryIndex_ < rotation.altPalettes.size();
+    input.palette = useAlt ? rotation.altPalettes[entryIndex_]
+                           : rotation.palettes[entryIndex_];
     // The entry's theme may also supply the picture's centrepiece. Taken from
-    // the same index as the palette, so colour and centre image can never come
-    // from different entries.
-    if (entryIndex_ < rotation.images.size()) {
+    // the same index and the same column as the palette, so colour and centre
+    // image can never come from different entries or different sides of a flip.
+    if (useAlt && entryIndex_ < rotation.altImages.size()) {
+      input.themeImage = rotation.altImages[entryIndex_];
+    } else if (entryIndex_ < rotation.images.size()) {
       input.themeImage = rotation.images[entryIndex_];
+    }
+    // And the backdrop, from the same index and the same column, for the same
+    // reason. Null here is not a hole: it is the theme saying "use the field".
+    if (useAlt && entryIndex_ < rotation.altBackgrounds.size()) {
+      input.backgroundImage = rotation.altBackgrounds[entryIndex_];
+    } else if (entryIndex_ < rotation.backgrounds.size()) {
+      input.backgroundImage = rotation.backgrounds[entryIndex_];
     }
     // The simulation chases the palette rather than snapping to it, so the
     // authored transition time is what governs the cross-fade. Two consecutive
@@ -449,6 +442,33 @@ void Engine::publishSimulationInput() {
         : std::max(0.0, selectedGroupMatches && rotation.selectedTransitionSeconds
                              ? *rotation.selectedTransitionSeconds
                              : 0.0);
+    if (editorPreviewActive || !selectedGroupMatches) {
+      // A preview is a cut: it is "show me this one", not a change being made,
+      // so it neither flips nor slides. All of its (very short) duration is the
+      // ease-out, which is what a bare release means.
+      input.transitionAttack = 0.0;
+      input.transitionHold = 0.0;
+      input.transitionRelease = input.transitionDuration;
+      input.centreTransition = CentreTransitionParams{};
+      // The backdrop cuts with it: a preview shows one entry, and half of it
+      // arriving by slide while the other half cuts is not a preview of
+      // anything.
+      input.backgroundTransitionAttack = 0.0;
+      input.backgroundTransitionHold = 0.0;
+      input.backgroundTransitionRelease = input.transitionDuration;
+      input.backgroundTransition = CentreTransitionParams{};
+    } else {
+      input.transitionAttack = std::max(0.0, rotation.selectedTransitionAttack);
+      input.transitionHold = std::max(0.0, rotation.selectedTransitionHold);
+      input.transitionRelease = std::max(0.0, rotation.selectedTransitionRelease);
+      input.centreTransition = rotation.selectedTransition;
+      input.backgroundTransitionAttack =
+          std::max(0.0, rotation.selectedBackgroundTransitionAttack);
+      input.backgroundTransitionHold = std::max(0.0, rotation.selectedBackgroundTransitionHold);
+      input.backgroundTransitionRelease =
+          std::max(0.0, rotation.selectedBackgroundTransitionRelease);
+      input.backgroundTransition = rotation.selectedBackgroundTransition;
+    }
     input.transitionPaused = rotation.paused && !editorPreviewActive;
   }
   applyControlLanes(snapshot, frame, input.settings, input.driverInterpolatedSettings);
@@ -458,6 +478,16 @@ void Engine::publishSimulationInput() {
   }
   if (const auto height = input.settings.find("__centreHeight"); height != input.settings.end()) {
     input.centreHeight = height->second;
+  }
+  if (const auto width = input.settings.find("__centreWidth"); width != input.settings.end()) {
+    input.centreWidth = width->second;
+  }
+  if (const auto fit = input.settings.find("__centreFit"); fit != input.settings.end()) {
+    input.centreFit = imageFitFor(fit->second);
+  }
+  if (const auto proportional = input.settings.find("__centreProportional");
+      proportional != input.settings.end()) {
+    input.centreProportional = proportional->second >= 0.5;
   }
   if (const auto blur = input.settings.find("__glowBlur"); blur != input.settings.end()) {
     input.glowBlurAmount = blur->second;
@@ -482,6 +512,16 @@ void Engine::publishSimulationInput() {
   }
   if (const auto width = input.settings.find("__bgWidth"); width != input.settings.end()) {
     input.backgroundWidth = width->second;
+  }
+  if (const auto scale = input.settings.find("__bgScale"); scale != input.settings.end()) {
+    input.backgroundScale = scale->second;
+  }
+  if (const auto fit = input.settings.find("__bgFit"); fit != input.settings.end()) {
+    input.backgroundFit = imageFitFor(fit->second);
+  }
+  if (const auto proportional = input.settings.find("__bgProportional");
+      proportional != input.settings.end()) {
+    input.backgroundProportional = proportional->second >= 0.5;
   }
   if (const auto opacity = input.settings.find("__vignetteOpacity");
       opacity != input.settings.end()) {
@@ -724,6 +764,16 @@ void Engine::renderLoop() {
     centreImageHeightForStatus_.store(latest->centreImage ? latest->centreImage->height : 0);
     centreImageFadeForStatus_.store(latest->centreImageFade);
 
+    // The backdrop pass runs when the module declares the blob field OR when the
+    // live colour theme names a background image. `enabled` was only ever about
+    // the FIELD -- a module opts into that by declaring a setting affecting
+    // `renderer.fluidBackground.speed` -- and a theme's picture is not the
+    // module's business. Without this, a background image set under a module
+    // with no fluid field simply never drew.
+    fluidSettings.image = latest->backgroundImage;
+    fluidSettings.imageFrom = latest->backgroundImageFrom;
+    fluidSettings.enabled = fluidSettings.enabled || latest->backgroundImage != nullptr
+                            || latest->backgroundImageFrom != nullptr;
     if (fluidSettings.enabled) {
       fluidPhaseForStatus_.store(renderer_.fluidPhase());
       fluidSettings.background = latest->fluidBackground;
@@ -734,6 +784,11 @@ void Engine::renderLoop() {
       // turn a smooth sweep into six visible steps a second.
       fluidSettings.heightFraction = latest->backgroundHeight;
       fluidSettings.widthFraction = latest->backgroundWidth;
+      fluidSettings.scale = latest->backgroundScale;
+      fluidSettings.fit = latest->backgroundFit;
+      fluidSettings.proportional = latest->backgroundProportional;
+      fluidSettings.imageFade = latest->backgroundImageFade;
+      fluidSettings.imageTransition = latest->backgroundTransition;
       fluidSettings.vignette = latest->vignetteColor;
       fluidSettings.vignetteOpacity = latest->vignetteOpacity;
       fluidSettings.vignetteSize = latest->vignetteSize;

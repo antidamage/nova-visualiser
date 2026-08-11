@@ -112,20 +112,49 @@ void Simulation::ingest() {
 
   if (centre != centreImage_) {
     // Identity, not contents: two entries naming the same library image are the
-    // same decoded buffer, so moving between them is not a cross-fade at all.
+    // same decoded buffer, so moving between them is not a transition at all.
     centreImagePrev_ = centreImage_;
     centreImage_ = centre;
     centreImageFadeSeconds_ = 0.0;
-    // Nothing to fade from, or no transition to fade over, means it is simply
-    // there -- a first paint should not dissolve up from an empty frame.
-    centreImageFade_ = (centreImagePrev_ && transitionDuration_ > 0.0) ? 0.0 : 1.0;
+    // THE INITIATOR OWNS THE TRANSITION. Latched here, at the instant the image
+    // changes, and then held: the incoming values describe the change that is
+    // starting, and reading them again next tick would let the entry being
+    // arrived at rewrite a transition already halfway through.
+    centreTransitionLatched_ = next.centreTransition;
+    centreTransitionAttack_ = std::max(0.0, next.transitionAttack);
+    centreTransitionHold_ = std::max(0.0, next.transitionHold);
+    centreTransitionRelease_ = std::max(0.0, next.transitionRelease);
+    // Nothing to leave from, or no time to do it in, means it is simply there --
+    // a first paint should not fly on from off screen.
+    const double length =
+        centreTransitionAttack_ + centreTransitionHold_ + centreTransitionRelease_;
+    centreImageFade_ = (centreImagePrev_ && length > 0.0) ? 0.0 : 1.0;
+  }
+
+  // The backdrop slot, on exactly the same terms and for the same reasons. No
+  // message clause: nothing overrides the backdrop, so this is simply whether
+  // the live theme supplies an image. Null means the procedural field draws.
+  if (next.backgroundImage != backgroundImage_) {
+    backgroundImagePrev_ = backgroundImage_;
+    backgroundImage_ = next.backgroundImage;
+    backgroundImageFadeSeconds_ = 0.0;
+    backgroundTransitionLatched_ = next.backgroundTransition;
+    backgroundTransitionAttack_ = std::max(0.0, next.backgroundTransitionAttack);
+    backgroundTransitionHold_ = std::max(0.0, next.backgroundTransitionHold);
+    backgroundTransitionRelease_ = std::max(0.0, next.backgroundTransitionRelease);
+    const double length = backgroundTransitionAttack_ + backgroundTransitionHold_
+                          + backgroundTransitionRelease_;
+    backgroundImageFade_ = (backgroundImagePrev_ && length > 0.0) ? 0.0 : 1.0;
   }
 
   // Authored as a percentage, held as a fraction -- the same convention the
   // frame geometry uses, and for the same reason: everything downstream of here
   // works in unit space.
   centreHeight_ = clampValue(next.centreHeight / 100.0, 0.0, 1.0);
-  messageScale_ = clampValue(next.messageScale, 0.1, 5.0);
+  centreWidth_ = clampValue(next.centreWidth / 100.0, 0.0, 1.0);
+  centreFit_ = next.centreFit;
+  centreProportional_ = next.centreProportional;
+  messageScale_ = clampValue<double>(next.messageScale, kImageScaleMinimum, kImageScaleMaximum);
   glowBlurAmount_ = clampValue(next.glowBlurAmount, 0.0, 20.0);
   glowOpacity_ = clampValue(next.glowOpacity, 0.0, 100.0);
   glowOverdrive_ = clampValue(next.glowOverdrive, 1.0, 10.0);
@@ -137,6 +166,9 @@ void Simulation::ingest() {
   // unit space and none of it had to move when the controls became 0-100.
   backgroundHeight_ = clampValue(next.backgroundHeight / 100.0, 0.0, 1.0);
   backgroundWidth_ = clampValue(next.backgroundWidth / 100.0, 0.0, 1.0);
+  backgroundScale_ = clampValue<double>(next.backgroundScale, kImageScaleMinimum, kImageScaleMaximum);
+  backgroundFit_ = next.backgroundFit;
+  backgroundProportional_ = next.backgroundProportional;
   vignetteOpacity_ = clampValue(next.vignetteOpacity / 100.0, 0.0, 1.0);
   vignetteSize_ = clampValue(next.vignetteSize, 0.0, 3.0);
   sceneBlendMode_ = next.sceneBlendMode;
@@ -184,22 +216,36 @@ SnapshotPtr Simulation::step() {
 }
 
 void Simulation::advanceConfiguration(double delta) {
-  // The centre image dissolves on a LINEAR ramp over the same transition the
+  // The centre image transitions on the authored RAMP over the same span the
   // palette chases across, so the picture's centrepiece and its colours settle
-  // together. Linear rather than the chase below on purpose: an exponential
+  // together. A ramp rather than the chase below on purpose: an exponential
   // approach only ever gets close, so the outgoing image would never reach zero
   // and could never be released.
   //
   // Deliberately ABOVE the pause check. Pausing means "stop advancing the
-  // playlist", not "freeze a dissolve that is already in flight" -- and a
+  // playlist", not "freeze a transition that is already in flight" -- and a
   // manual skip pauses the rotation, so leaving this below the early return
-  // stranded the fade at 0 and held the OUTGOING image on screen permanently.
-  // A transition that has begun always finishes.
+  // stranded the progress at 0 and held the OUTGOING image on screen
+  // permanently. A transition that has begun always finishes.
   if (centreImageFade_ < 1.0) {
     centreImageFadeSeconds_ += delta;
-    centreImageFade_ = centreImageFade(static_cast<float>(centreImageFadeSeconds_),
-                                       static_cast<float>(transitionDuration_));
+    centreImageFade_ = transitionRamp(static_cast<float>(centreImageFadeSeconds_),
+                                      static_cast<float>(centreTransitionAttack_),
+                                      static_cast<float>(centreTransitionHold_),
+                                      static_cast<float>(centreTransitionRelease_));
     if (centreImageFade_ >= 1.0) centreImagePrev_.reset();
+  }
+
+  // The backdrop's, on its own clock and its own ramp: the two slots change at
+  // the same moment but run independently, so the backdrop can still be
+  // dissolving after the centrepiece has landed.
+  if (backgroundImageFade_ < 1.0) {
+    backgroundImageFadeSeconds_ += delta;
+    backgroundImageFade_ = transitionRamp(static_cast<float>(backgroundImageFadeSeconds_),
+                                          static_cast<float>(backgroundTransitionAttack_),
+                                          static_cast<float>(backgroundTransitionHold_),
+                                          static_cast<float>(backgroundTransitionRelease_));
+    if (backgroundImageFade_ >= 1.0) backgroundImagePrev_.reset();
   }
 
   if (transitionPaused_) return;
@@ -1286,7 +1332,11 @@ SnapshotPtr Simulation::publish(Diagnostics diagnostics, double elapsedMilliseco
   snapshot->centreImage = centreImage_;
   snapshot->centreImageFrom = centreImagePrev_;
   snapshot->centreImageFade = static_cast<float>(centreImageFade_);
+  snapshot->centreTransition = centreTransitionLatched_;
   snapshot->centreImageHeight = static_cast<float>(centreHeight_);
+  snapshot->centreImageWidth = static_cast<float>(centreWidth_);
+  snapshot->centreImageFit = centreFit_;
+  snapshot->centreImageProportional = centreProportional_;
   snapshot->messageScale = static_cast<float>(messageScale_);
   snapshot->messageColor = palette_.color("primaryText", palette_.highlight());
   snapshot->glowBlurAmount = static_cast<float>(glowBlurAmount_);
@@ -1296,6 +1346,13 @@ SnapshotPtr Simulation::publish(Diagnostics diagnostics, double elapsedMilliseco
   snapshot->glowBlendMode = glowBlendMode_;
   snapshot->backgroundHeight = static_cast<float>(backgroundHeight_);
   snapshot->backgroundWidth = static_cast<float>(backgroundWidth_);
+  snapshot->backgroundScale = static_cast<float>(backgroundScale_);
+  snapshot->backgroundFit = backgroundFit_;
+  snapshot->backgroundProportional = backgroundProportional_;
+  snapshot->backgroundImage = backgroundImage_;
+  snapshot->backgroundImageFrom = backgroundImagePrev_;
+  snapshot->backgroundImageFade = static_cast<float>(backgroundImageFade_);
+  snapshot->backgroundTransition = backgroundTransitionLatched_;
   // Black when the theme declares no `vignette` slot, which is the colour the
   // edge gradients were authored with -- so a theme from before this slot
   // existed frames the band exactly as it always did.

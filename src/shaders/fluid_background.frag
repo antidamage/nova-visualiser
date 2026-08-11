@@ -50,6 +50,38 @@ uniform float apexGlow;
 uniform float blobScale;
 uniform float blobSoftness;
 
+// The colour theme's background image, when it names one. Two planes so a theme
+// change can transition between them, on exactly the terms `centre_image.frag`
+// already carries -- the arithmetic is stated once in
+// core/centre_image_transition.h and both shaders mirror it.
+//
+// This sits INSIDE the backdrop pass rather than in one of its own, which is
+// what puts it under the vignette: the band clip and the four edge gradients at
+// the bottom of this shader run over whatever `field()` produced, and they do
+// not care whether that was blobs or a photograph. `hasImage` 0 is the original
+// shader exactly, so a theme with no background image pays nothing.
+layout(binding = 0) uniform sampler2D imageTo;
+layout(binding = 1) uniform sampler2D imageFrom;
+uniform int hasImage;
+uniform int hasImageFrom;
+uniform vec2 imageHalfExtentTo;
+uniform vec2 imageHalfExtentFrom;
+uniform float imageProgress;
+uniform int imageMode;
+uniform float imageAxisRadians;
+uniform int imageSegments;
+uniform int imageReturnOrigin;
+uniform float frameAspect;
+// The colour an uncovered part of the frame falls back to, so a fitted image
+// smaller than the band has something defined behind it rather than a hole.
+uniform vec3 imageBackdrop;
+
+const int MODE_CROSSFADE = 0;
+const int MODE_FLIP = 1;
+const int MODE_SLIDE = 2;
+const float FLIP_EPSILON = 1e-4;
+const float PI = 3.14159265358979323846;
+
 vec3 hsvToRgb(vec3 c) {
   vec4 k = vec4(1.0, 2.0 / 3.0, 1.0 / 3.0, 3.0);
   vec3 p = abs(fract(c.xxx + k.xyz) * 6.0 - k.www);
@@ -82,6 +114,104 @@ float peakField(vec2 p, vec2 center, float radius, float seed, float warp, float
   return pow(peak, max(0.4, falloff)) * (0.70 + ridge * 0.45);
 }
 
+// One plane of the background image, sampled inside its own rectangle and clear
+// outside it.
+//
+// A copy of `plane()` in centre_image.frag, deliberately: the two shaders are
+// separate compilation units with no include mechanism between them, and the
+// arithmetic they must both match is stated once in
+// core/centre_image_transition.h with a conformance case locking it. `uv` here
+// is already in the top-left-origin frame space the rest of this shader works
+// in, which is the one difference -- the centre pass flips at the end instead.
+vec4 imagePlane(sampler2D image, vec2 halfExtent, bool incoming, vec2 frameUv) {
+  if (halfExtent.x <= 0.0 || halfExtent.y <= 0.0) return vec4(0.0);
+
+  vec2 centred = (frameUv - vec2(0.5)) * vec2(frameAspect, 1.0);
+  if (imageMode != MODE_CROSSFADE) {
+    vec2 along = vec2(cos(imageAxisRadians), sin(imageAxisRadians));
+    vec2 across = vec2(-along.y, along.x);
+    vec2 local = vec2(dot(centred, along), dot(centred, across));
+
+    if (imageMode == MODE_FLIP) {
+      float collapse = abs(cos(PI * clamp(imageProgress, 0.0, 1.0)));
+      if (collapse < FLIP_EPSILON) return vec4(0.0);
+      local.x /= collapse;
+    } else {
+      vec2 halfLocal = vec2(
+        abs(halfExtent.x * frameAspect * along.x) + abs(halfExtent.y * along.y),
+        abs(halfExtent.x * frameAspect * across.x) + abs(halfExtent.y * across.y));
+      int index = 0;
+      if (halfLocal.y > 0.0) {
+        float position = (local.y / halfLocal.y) * 0.5 + 0.5;
+        index = clamp(int(floor(position * float(imageSegments))), 0, imageSegments - 1);
+      }
+      float direction = (index % 2 == 0) ? 1.0 : -1.0;
+      float frameSpan = 0.5 * (abs(along.x) * frameAspect + abs(along.y));
+      float clearDistance = frameSpan + halfLocal.x;
+
+      float clamped = clamp(imageProgress, 0.0, 1.0);
+      float offset;
+      if (!incoming) {
+        offset = direction * clearDistance * (clamped * 2.0);
+      } else {
+        float arriving = clamped * 2.0 - 1.0;
+        float travel = (imageReturnOrigin != 0) ? -direction : direction;
+        offset = travel * clearDistance * (arriving - 1.0);
+      }
+      local.x -= offset;
+    }
+
+    centred = along * local.x + across * local.y;
+  }
+
+  vec2 texel = centred / vec2(frameAspect, 1.0) / (halfExtent * 2.0) + vec2(0.5);
+  // Outside the fitted rectangle there is no image, which is what makes a fill
+  // read as a crop rather than a squash -- and what carries a slid segment off
+  // frame rather than wrapping it.
+  if (any(lessThan(texel, vec2(0.0))) || any(greaterThan(texel, vec2(1.0)))) return vec4(0.0);
+  // CPU rows are top-down and `frameUv` is already top-left origin, so unlike
+  // the centre pass there is nothing to flip here.
+  return texture(image, texel);
+}
+
+// The background image as one premultiplied colour, transitions resolved.
+//
+// Mirrors main() in centre_image.frag: a flip and a slide draw exactly ONE
+// plane, swapping at the midpoint, and only a cross-fade draws both. Where
+// nothing covers, the theme's backdrop colour shows through, so a fitted image
+// smaller than the frame sits on the palette rather than on a hole.
+vec3 imageField(vec2 frameUv) {
+  vec4 accumulated = vec4(0.0);
+  float weight = clamp(imageProgress, 0.0, 1.0);
+
+  if (imageMode != MODE_CROSSFADE && hasImageFrom != 0) {
+    accumulated = weight >= 0.5
+      ? imagePlane(imageTo, imageHalfExtentTo, true, frameUv)
+      : imagePlane(imageFrom, imageHalfExtentFrom, false, frameUv);
+  } else {
+    accumulated = imagePlane(imageTo, imageHalfExtentTo, true, frameUv) * weight;
+    if (hasImageFrom != 0) {
+      accumulated += imagePlane(imageFrom, imageHalfExtentFrom, false, frameUv) * (1.0 - weight);
+    }
+  }
+
+  // Both planes are premultiplied at decode time, so this IS the source-over
+  // term -- not a mix, which would darken the image by its own coverage a
+  // second time.
+  float coverage = clamp(accumulated.a, 0.0, 1.0);
+  return accumulated.rgb + imageBackdrop * (1.0 - coverage);
+}
+
+// The frame the backdrop is drawn into: the four edge gradients, then the band's
+// soft clip into the bars around it.
+//
+// Shared by both backdrop paths on purpose. The vignette is the LAST thing that
+// happens to a backdrop whatever the backdrop is, which is precisely what "the
+// background image sits behind the vignette" has to mean -- if the image had its
+// own copy of this, the two could drift and the frame would look different
+// depending on whether a theme happened to name a picture.
+vec3 framedBackdrop(vec3 color, vec2 local, float inBand);
+
 // One SwiftUI LinearGradient stop pair, as coverage. Each of the four vignette
 // gradients runs from `vignetteOpacity` coverage at the edge to fully clear over
 // `extent` of the band. The authored extents (0.18 across, 0.28 down) are
@@ -91,11 +221,39 @@ float edge(float t, float extent) {
   return vignetteOpacity * clamp(1.0 - t / max(0.0001, extent * vignetteSize), 0.0, 1.0);
 }
 
+vec3 framedBackdrop(vec3 color, vec2 local, float inBand) {
+  // PhonoscopeEdgeVignette: four gradients in BAND-local space (the 0.28 stop is
+  // 28% of the band, not of the screen). SwiftUI's ZStack composites them
+  // source-over, so they combine as 1 - prod(1 - a), not as a sum.
+  float left = edge(local.x, 0.18);
+  float right = edge(1.0 - local.x, 0.18);
+  float top = edge(local.y, 0.28);
+  float bottom = edge(1.0 - local.y, 0.28);
+  float shade = 1.0 - (1.0 - left) * (1.0 - right) * (1.0 - top) * (1.0 - bottom);
+  // Toward the vignette colour rather than a plain darken, so the gradient meets
+  // the bars outside the band seamlessly. With the default black slot this is
+  // exactly the original `color *= (1.0 - shade)`.
+  vec3 shaded = mix(color, vignetteColor, shade);
+  // The band is opaque and so are the bars around it, so coverage is 1 across
+  // the frame; `inBand` only survives as the one-pixel soft edge.
+  return mix(vignetteColor, shaded, inBand);
+}
+
 void main() {
   // GL's framebuffer origin is bottom-left and SwiftUI's is top-left. Flip here
   // rather than in the composite, so the blob motion matches the local engine
   // frame for frame when the two are compared side by side.
   vec2 frameUv = vec2(uv.x, 1.0 - uv.y);
+
+  // A background image REPLACES the field rather than layering over it, and it
+  // brings its own geometry with it: the width, height and scale sized the band
+  // when the band was the backdrop, and they size the IMAGE when the image is.
+  // So there is no band to clip here -- the fitted rectangle is the geometry,
+  // and the vignette closes over the whole frame around it.
+  if (hasImage != 0) {
+    outColor = vec4(framedBackdrop(imageField(frameUv), frameUv, 1.0), 1.0);
+    return;
+  }
 
   // Band-local coordinates. The band is centred on both axes.
   float bandTop = 0.5 - bandFraction * 0.5;
@@ -171,21 +329,5 @@ void main() {
   color = min(color, cap);
   color = clamp(color, 0.0, 1.0);
 
-  // PhonoscopeEdgeVignette: four gradients in BAND-local space (the 0.28 stop is
-  // 28% of the band, not of the screen). SwiftUI's ZStack composites them
-  // source-over, so they combine as 1 - prod(1 - a), not as a sum.
-  float left = edge(bandUv.x, 0.18);
-  float right = edge(1.0 - bandUv.x, 0.18);
-  float top = edge(bandLocalY, 0.28);
-  float bottom = edge(1.0 - bandLocalY, 0.28);
-  float shade = 1.0 - (1.0 - left) * (1.0 - right) * (1.0 - top) * (1.0 - bottom);
-  // Toward the vignette colour rather than a plain darken, so the gradient meets
-  // the bars outside the band seamlessly. With the default black slot this is
-  // exactly the original `color *= (1.0 - shade)`.
-  color = mix(color, vignetteColor, shade);
-
-  // The band is opaque and so are the bars around it, so coverage is 1 across
-  // the frame; `inBand` only survives as the one-pixel soft edge.
-  vec3 framed = mix(vignetteColor, color, inBand);
-  outColor = vec4(framed, 1.0);
+  outColor = vec4(framedBackdrop(color, vec2(bandUv.x, bandLocalY), inBand), 1.0);
 }
