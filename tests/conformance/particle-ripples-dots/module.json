@@ -1,0 +1,785 @@
+{
+ "boundary": {
+  "mode": "clamp",
+  "restitution": 0
+ },
+ "bounds": {
+  "max": [
+   1.777778,
+   1
+  ],
+  "min": [
+   -1.777778,
+   -1
+  ]
+ },
+ "description": "A centered screen-wide particle lattice carrying slow, damped beat ripples.",
+ "dimension": "2d",
+ "engineVersion": 1,
+ "id": "particle-ripples",
+ "metadata": {
+  "author": "Nova",
+  "license": "Household use",
+  "tags": [
+   "particle",
+   "field",
+   "ripple",
+   "2d"
+  ]
+ },
+ "name": "Particle Ripples",
+ "packageName": "nz.skull.nova.visualiser.particle-ripples",
+ "paletteSlots": [
+  {
+   "defaultRgb": [
+    0,
+    0,
+    0
+   ],
+   "id": "backgroundPrimary",
+   "label": "Background Primary"
+  },
+  {
+   "defaultRgb": [
+    12,
+    18,
+    28
+   ],
+   "id": "backgroundSecondary",
+   "label": "Background Secondary"
+  },
+  {
+   "defaultRgb": [
+    115,
+    115,
+    115
+   ],
+   "id": "dotPrimary",
+   "label": "Dot Primary"
+  },
+  {
+   "defaultRgb": [
+    217,
+    217,
+    217
+   ],
+   "id": "dotSecondary",
+   "label": "Dot Secondary"
+  },
+  {
+   "defaultRgb": [
+    232,
+    238,
+    255
+   ],
+   "id": "glowPrimary",
+   "label": "Dot Glow Primary"
+  },
+  {
+   "defaultRgb": [
+    166,
+    190,
+    230
+   ],
+   "id": "glowSecondary",
+   "label": "Dot Glow Secondary"
+  },
+  {
+   "defaultRgb": [
+    132,
+    144,
+    166
+   ],
+   "id": "linePrimary",
+   "label": "Grid Line Primary"
+  },
+  {
+   "defaultRgb": [
+    195,
+    205,
+    224
+   ],
+   "id": "lineSecondary",
+   "label": "Grid Line Secondary"
+  },
+  {
+   "defaultRgb": [
+    115,
+    115,
+    115
+   ],
+   "id": "trailPrimary",
+   "label": "Dot Trail Primary"
+  },
+  {
+   "defaultRgb": [
+    217,
+    217,
+    217
+   ],
+   "id": "trailSecondary",
+   "label": "Dot Trail Secondary"
+  },
+  {
+   "defaultRgb": [
+    255,
+    255,
+    255
+   ],
+   "id": "primaryText",
+   "label": "Primary Text"
+  },
+  {
+   "defaultRgb": [
+    184,
+    184,
+    184
+   ],
+   "id": "secondaryText",
+   "label": "Secondary Text"
+  },
+  {
+   "defaultRgb": [
+    0,
+    0,
+    0
+   ],
+   "id": "vignette",
+   "label": "Vignette"
+  }
+ ],
+ "resources": {
+  "maxInteractiveFieldEntities": 16384,
+  "maxParticles": 16384,
+  "maxRenderBatches": 4
+ },
+ "scene": [
+  {
+   "effectSources": [
+    {
+     "anticipation": {
+      "$expr": "settings.anticipation",
+      "code": [
+       {
+        "key": "settings.anticipation",
+        "op": "load"
+       }
+      ]
+     },
+     "attack": {
+      "$expr": "settings.ramp_up",
+      "code": [
+       {
+        "key": "settings.ramp_up",
+        "op": "load"
+       }
+      ]
+     },
+     "channel": "energy",
+     "duration": 6,
+     "falloff": 0.965,
+     "flashPower": {
+      "$expr": "settings.flash_power",
+      "code": [
+       {
+        "key": "settings.flash_power",
+        "op": "load"
+       }
+      ]
+     },
+     "id": "beat-ripple",
+     "kind": "wave",
+     "propagation": "radial",
+     "release": {
+      "$expr": "settings.release",
+      "code": [
+       {
+        "key": "settings.release",
+        "op": "load"
+       }
+      ]
+     },
+     "shape": "circle",
+     "speed": 0.36,
+     "steepness": 0.9,
+     "strength": {
+      "$expr": "settings.intensity * (0.45 + audio.bass * 0.55) * mix(1, settings.strong_beat_multiplier, smoothstep(0.55, 1, audio.bass))",
+      "code": [
+       {
+        "key": "settings.intensity",
+        "op": "load"
+       },
+       {
+        "op": "const",
+        "value": 0.45
+       },
+       {
+        "key": "audio.bass",
+        "op": "load"
+       },
+       {
+        "op": "const",
+        "value": 0.55
+       },
+       {
+        "op": "mul"
+       },
+       {
+        "op": "add"
+       },
+       {
+        "op": "mul"
+       },
+       {
+        "op": "const",
+        "value": 1
+       },
+       {
+        "key": "settings.strong_beat_multiplier",
+        "op": "load"
+       },
+       {
+        "op": "const",
+        "value": 0.55
+       },
+       {
+        "op": "const",
+        "value": 1
+       },
+       {
+        "key": "audio.bass",
+        "op": "load"
+       },
+       {
+        "argc": 3,
+        "fn": "smoothstep",
+        "op": "call"
+       },
+       {
+        "argc": 3,
+        "fn": "mix",
+        "op": "call"
+       },
+       {
+        "op": "mul"
+       }
+      ]
+     },
+     "trigger": "beat",
+     "waveform": "gerstner",
+     "wavelength": 0.095238
+    }
+   ],
+   "field": {
+    "channels": {
+     "energy": 0
+    },
+    "count": 2486,
+    "density": {
+     "$expr": "settings.complexity",
+     "code": [
+      {
+       "key": "settings.complexity",
+       "op": "load"
+      }
+     ]
+    },
+    "extentX": {
+     "$expr": "settings.grid_width",
+     "code": [
+      {
+       "key": "settings.grid_width",
+       "op": "load"
+      }
+     ]
+    },
+    "extentY": {
+     "$expr": "settings.grid_height",
+     "code": [
+      {
+       "key": "settings.grid_height",
+       "op": "load"
+      }
+     ]
+    },
+    "jitter": 0,
+    "layout": "grid",
+    "resolution": [
+     113,
+     22
+    ],
+    "spacing": [
+     0.031746,
+     0.031746
+    ],
+    "template": "particle",
+    "topology": "grid",
+    "wireframe": {
+     "$expr": "settings.grid_wireframe",
+     "code": [
+      {
+       "key": "settings.grid_wireframe",
+       "op": "load"
+      }
+     ]
+    },
+    "wireframeColorEnd": {
+     "$expr": "palette.lineSecondary",
+     "code": [
+      {
+       "key": "palette.lineSecondary",
+       "op": "load"
+      }
+     ]
+    },
+    "wireframeColorStart": {
+     "$expr": "palette.linePrimary",
+     "code": [
+      {
+       "key": "palette.linePrimary",
+       "op": "load"
+      }
+     ]
+    }
+   },
+   "id": "particle-grid"
+  }
+ ],
+ "settings": [
+  {
+   "affects": [
+    "scene.particle-grid.effectSources.beat-ripple.anticipation"
+   ],
+   "control": "slider",
+   "curve": {
+    "exponent": 1,
+    "type": "linear"
+   },
+   "default": 0.5,
+   "description": "How early the leading edge starts to illuminate before the crest arrives.",
+   "id": "anticipation",
+   "label": "Glow anticipation",
+   "max": 0.9,
+   "min": 0.12,
+   "options": [],
+   "section": "physics",
+   "step": 0.01,
+   "updateMode": "smooth"
+  },
+  {
+   "affects": [
+    "scene.particle-grid.field.density"
+   ],
+   "control": "slider",
+   "curve": {
+    "exponent": 1.5,
+    "type": "power"
+   },
+   "default": 0.6,
+   "description": "Grid density. Lower settings reduce both ripple simulation and draw count while preserving the full-screen field.",
+   "id": "complexity",
+   "label": "Visual complexity",
+   "max": 1,
+   "min": 0.2,
+   "options": [],
+   "section": "physics",
+   "step": 0.05,
+   "updateMode": "structural"
+  },
+  {
+   "affects": [
+    "templates.particle.render.dotSizePixels"
+   ],
+   "control": "slider",
+   "curve": {
+    "exponent": 1,
+    "type": "linear"
+   },
+   "default": 3.8,
+   "description": "Diameter of each lattice dot in true device pixels of the output.",
+   "id": "dot_size",
+   "label": "Dot size",
+   "max": 50,
+   "min": 0,
+   "options": [],
+   "section": "motion",
+   "step": 0.1,
+   "updateMode": "smooth"
+  },
+  {
+   "affects": [
+    "scene.particle-grid.effectSources.beat-ripple.flashPower"
+   ],
+   "control": "slider",
+   "curve": {
+    "exponent": 1.5,
+    "type": "power"
+   },
+   "default": 3.8,
+   "description": "Shapes how sharply the leading-edge glow concentrates into its crest.",
+   "id": "flash_power",
+   "label": "Flash power",
+   "max": 8,
+   "min": 1.5,
+   "options": [],
+   "section": "physics",
+   "step": 0.1,
+   "updateMode": "smooth"
+  },
+  {
+   "affects": [
+    "renderer.fluidBackground.speed"
+   ],
+   "control": "slider",
+   "curve": {
+    "exponent": 1,
+    "type": "linear"
+   },
+   "default": 0.65,
+   "description": "Animation speed of the soft fluid colour field behind the particle lattice.",
+   "id": "fluid_speed",
+   "label": "Fluid background speed",
+   "max": 1.5,
+   "min": 0.25,
+   "options": [],
+   "section": "physics",
+   "step": 0.05,
+   "updateMode": "smooth"
+  },
+  {
+   "affects": [
+    "scene.particle-grid.field.extentY"
+   ],
+   "control": "slider",
+   "default": 0.3333,
+   "description": "Height of the particle lattice as a share of the frame. The gap between dots comes from Visual complexity, so a taller grid means more rows, not looser spacing.",
+   "id": "grid_height",
+   "label": "Grid height",
+   "max": 1,
+   "min": 0,
+   "options": [],
+   "section": "physics",
+   "step": 0.01
+  },
+  {
+   "affects": [
+    "scene.particle-grid.field.extentX"
+   ],
+   "control": "slider",
+   "default": 1,
+   "description": "Width of the particle lattice as a share of the frame. The gap between dots comes from Visual complexity, so a wider grid means more columns, not wider spacing.",
+   "id": "grid_width",
+   "label": "Grid width",
+   "max": 1,
+   "min": 0,
+   "options": [],
+   "section": "physics",
+   "step": 0.01
+  },
+  {
+   "affects": [
+    "scene.particle-grid.field.wireframe"
+   ],
+   "control": "toggle",
+   "curve": {
+    "exponent": 1,
+    "type": "linear"
+   },
+   "default": 0,
+   "description": "Connect neighbouring dots with square-grid lines using their dedicated line colours.",
+   "id": "grid_wireframe",
+   "label": "Draw square grid",
+   "max": 1,
+   "min": 0,
+   "options": [],
+   "section": "physics",
+   "step": 1,
+   "updateMode": "smooth"
+  },
+  {
+   "affects": [
+    "scene.particle-grid.effectSources.beat-ripple.strength"
+   ],
+   "control": "slider",
+   "curve": {
+    "exponent": 1,
+    "type": "linear"
+   },
+   "default": 1,
+   "description": "Base energy carried by every beat wave.",
+   "id": "intensity",
+   "label": "Ripple intensity",
+   "max": 2,
+   "min": 0,
+   "options": [],
+   "section": "physics",
+   "step": 0.05,
+   "updateMode": "smooth"
+  },
+  {
+   "affects": [
+    "scene.particle-grid.effectSources.beat-ripple.offsetMagnifier"
+   ],
+   "control": "slider",
+   "curve": {
+    "exponent": 1,
+    "type": "linear"
+   },
+   "default": 1,
+   "description": "Multiplies the Gerstner crest displacement so the particle motion is more visible.",
+   "id": "offset_magnifier",
+   "label": "X/Y offset magnifier",
+   "max": 50,
+   "min": 0,
+   "options": [],
+   "section": "physics",
+   "step": 0.5,
+   "updateMode": "smooth"
+  },
+  {
+   "affects": [
+    "templates.particle.render.flareGlow"
+   ],
+   "control": "slider",
+   "curve": {
+    "exponent": 2,
+    "type": "power"
+   },
+   "default": 6.5,
+   "description": "Maximum HDR bloom energy at a fully activated crest.",
+   "id": "peak_glow",
+   "label": "Peak glow",
+   "max": 12,
+   "min": 1,
+   "options": [],
+   "section": "physics",
+   "step": 0.25,
+   "updateMode": "smooth"
+  },
+  {
+   "affects": [
+    "templates.particle.render.flareThreshold"
+   ],
+   "control": "slider",
+   "curve": {
+    "exponent": 1.5,
+    "type": "power"
+   },
+   "default": 0.28,
+   "description": "Wave energy at which the HDR flare begins to bloom.",
+   "id": "peak_threshold",
+   "label": "Peak threshold",
+   "max": 0.8,
+   "min": 0.1,
+   "options": [],
+   "section": "physics",
+   "step": 0.01,
+   "updateMode": "smooth"
+  },
+  {
+   "affects": [
+    "scene.particle-grid.effectSources.beat-ripple.attack"
+   ],
+   "control": "slider",
+   "curve": {
+    "exponent": 2.2,
+    "type": "power"
+   },
+   "default": 0.04,
+   "description": "Time taken for rising wave energy to reach the flash.",
+   "id": "ramp_up",
+   "label": "Flash ramp up",
+   "max": 0.2,
+   "min": 0.015,
+   "options": [],
+   "section": "physics",
+   "step": 0.005,
+   "updateMode": "smooth"
+  },
+  {
+   "affects": [
+    "scene.particle-grid.effectSources.beat-ripple.release"
+   ],
+   "control": "slider",
+   "curve": {
+    "exponent": 1.6,
+    "type": "power"
+   },
+   "default": 0.7,
+   "description": "Time for the crest glow to ease back into the dot.",
+   "id": "release",
+   "label": "Glow release",
+   "max": 1.5,
+   "min": 0.15,
+   "options": [],
+   "section": "physics",
+   "step": 0.05,
+   "updateMode": "smooth"
+  },
+  {
+   "affects": [
+    "scene.particle-grid.effectSources.beat-ripple.strength"
+   ],
+   "control": "slider",
+   "curve": {
+    "exponent": 1.6,
+    "type": "power"
+   },
+   "default": 1.65,
+   "description": "Extra wave energy applied only as bass strength enters its upper range.",
+   "id": "strong_beat_multiplier",
+   "label": "Strong beat multiplier",
+   "max": 3,
+   "min": 1,
+   "options": [],
+   "section": "physics",
+   "step": 0.05,
+   "updateMode": "smooth"
+  },
+  {
+   "affects": [
+    "templates.particle.render.trailLength"
+   ],
+   "control": "slider",
+   "curve": {
+    "exponent": 1.4,
+    "type": "power"
+   },
+   "default": 7,
+   "description": "Length of the tapered wake behind particles that cross the glow threshold, in particle radii. Zero disables trails.",
+   "id": "trail_length",
+   "label": "Trail length",
+   "max": 500,
+   "min": 0,
+   "options": [],
+   "section": "physics",
+   "step": 0.5,
+   "updateMode": "smooth"
+  }
+ ],
+ "templates": {
+  "particle": {
+   "effectReceivers": [
+    {
+     "accepts": [
+      "wave"
+     ],
+     "operation": "add",
+     "scale": 1,
+     "target": "field.energy"
+    }
+   ],
+   "physics": {
+    "drag": 0.18,
+    "inertia": 0.92,
+    "mass": 1.2
+   },
+   "render": {
+    "beatSize": 0,
+    "colorEnd": {
+     "$expr": "palette.dotSecondary",
+     "code": [
+      {
+       "key": "palette.dotSecondary",
+       "op": "load"
+      }
+     ]
+    },
+    "colorStart": {
+     "$expr": "palette.dotPrimary",
+     "code": [
+      {
+       "key": "palette.dotPrimary",
+       "op": "load"
+      }
+     ]
+    },
+    "energySize": 0,
+    "flareGlow": {
+     "$expr": "settings.peak_glow",
+     "code": [
+      {
+       "key": "settings.peak_glow",
+       "op": "load"
+      }
+     ]
+    },
+    "flareSize": 0,
+    "flareThreshold": {
+     "$expr": "settings.peak_threshold",
+     "code": [
+      {
+       "key": "settings.peak_threshold",
+       "op": "load"
+      }
+     ]
+    },
+    "glow": 1.25,
+    "glowColorEnd": {
+     "$expr": "palette.glowSecondary",
+     "code": [
+      {
+       "key": "palette.glowSecondary",
+       "op": "load"
+      }
+     ]
+    },
+    "glowColorStart": {
+     "$expr": "palette.glowPrimary",
+     "code": [
+      {
+       "key": "palette.glowPrimary",
+       "op": "load"
+      }
+     ]
+    },
+    "material": "emissive",
+    "primitive": "point",
+    "trailColorEnd": {
+     "$expr": "palette.trailSecondary",
+     "code": [
+      {
+       "key": "palette.trailSecondary",
+       "op": "load"
+      }
+     ]
+    },
+    "trailColorStart": {
+     "$expr": "palette.trailPrimary",
+     "code": [
+      {
+       "key": "palette.trailPrimary",
+       "op": "load"
+      }
+     ]
+    },
+    "trailLength": {
+     "$expr": "settings.trail_length",
+     "code": [
+      {
+       "key": "settings.trail_length",
+       "op": "load"
+      }
+     ]
+    },
+    "dotSizePixels": {
+     "$expr": "settings.dot_size",
+     "code": [
+      {
+       "key": "settings.dot_size",
+       "op": "load"
+      }
+     ]
+    }
+   },
+   "transform": {
+    "scale": [
+     0.0035,
+     0.0035,
+     1
+    ]
+   }
+  }
+ },
+ "version": "2.0.0"
+}

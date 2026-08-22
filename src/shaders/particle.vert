@@ -50,11 +50,18 @@ void main() {
   // Only positions, radius and the trail vector are interpolated. Colours are
   // already chased on the simulation thread, and interpolating the primitive or
   // material codes would produce nonsense in the fragment branch.
+  //
+  // `meta.w` joins them because it is a grid wire's SOURCE half-width, the
+  // partner of the destination half-width already carried in `positionSize.w`.
+  // Easing one and not the other makes the far end of every wire pop at the sim
+  // rate while the near end glides. It is zero on every other primitive, so
+  // interpolating it costs them nothing.
   if (blend.y > 0.5) {
     Particle old = previous[gl_InstanceID];
     float alpha = blend.x;
     particle.positionSize = mix(old.positionSize, particle.positionSize, alpha);
     particle.trail.xyz = mix(old.trail.xyz, particle.trail.xyz, alpha);
+    particle.meta.w = mix(old.meta.w, particle.meta.w, alpha);
   }
 
   vec3 p = particle.positionSize.xyz;
@@ -94,7 +101,10 @@ void main() {
     vec2 clipNormal = vec2(-screenDirection.y / aspect, screenDirection.x);
     float progress = (corner.x + 1.0) * 0.5;
     vec2 lineCenter = p.xy - delta * (1.0 - progress);
-    clipPosition = lineCenter + clipNormal * corner.y * particle.positionSize.w;
+    // Each end of a wire meets a dot, so the wire tapers between the two: at
+    // progress 0 it is the source dot's width, at 1 the destination's.
+    float halfWidth = mix(particle.meta.w, particle.positionSize.w, progress);
+    clipPosition = lineCenter + clipNormal * corner.y * halfWidth;
   } else if (particle.meta.y > 4.5 && particle.trail.w > 0.0) {
     // Trail: a tapered wake behind the dot.
     vec2 direction = particle.trail.xy;

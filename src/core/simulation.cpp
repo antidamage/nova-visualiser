@@ -93,6 +93,9 @@ void Simulation::ingest() {
   targetPalette_ = next.palette;
   transitionDuration_ = clampValue(next.transitionDuration, 0.0, 600.0);
   transitionPaused_ = next.transitionPaused;
+  // Not chased toward like the settings above: a resolution change is a cut, and
+  // easing a dot through the intermediate sizes would read as a glitch.
+  outputHeight_ = clampValue(next.outputHeight, 1.0, 16384.0);
   moduleKey_ = nextKey;
   module_ = next.module;
   reloadGeneration_ = next.reloadGeneration;
@@ -268,8 +271,16 @@ void Simulation::advanceConfiguration(double delta) {
       auto it = settings_.find(settingId);
       if (it == settings_.end()) continue;
       const float value = static_cast<float>(it->second);
+      // Pixels become a clip radius once, above the entity loop: the divisor is
+      // the frame's height, not anything per dot. Clamped on the same 0..0.32
+      // clip axis as energySize/beatSize/flareSize. Zero is legal and means no
+      // dots -- there is no visible floor to fall back to.
+      const float dotSize = field == LiveField::DotSizePixels
+          ? clampValue(dotSizeClip(value, static_cast<float>(outputHeight_)), 0.0f, 0.32f)
+          : 0.0f;
       for (Entity& entity : entities_) {
         switch (field) {
+          case LiveField::DotSizePixels: entity.size = dotSize; break;
           case LiveField::FlareThreshold: entity.flareThreshold = clampValue(value, 0.0f, 2.0f); break;
           case LiveField::FlareGlow: entity.flareGlow = clampValue(value, 0.0f, 12.0f); break;
           // Match the Swift fallback: the declaration owns the range. The
@@ -404,8 +415,16 @@ Simulation::Entity Simulation::styledEntity(const json::Value& value, const Vec3
   const float lifetime =
       static_cast<float>(Expression::evaluate(value.find("lifetime"), inputs, 0));
 
+  // `render.dotSizePixels` is a diameter in TRUE DEVICE PIXELS of the output and
+  // wins wherever it is present; `transform.scale[0]` is the legacy clip-space
+  // size and stays the fallback for every module that predates the key. Both are
+  // still evaluated here, at build, so the very first published frame is right
+  // before `advanceConfiguration` has run the live pass once.
   float size = 0.025f;
-  if (const json::Value* transform = value.find("transform")) {
+  if (const json::Value* dotPixels = render.find("dotSizePixels")) {
+    size = dotSizeClip(static_cast<float>(Expression::evaluate(dotPixels, inputs, 3.8)),
+                       static_cast<float>(outputHeight_));
+  } else if (const json::Value* transform = value.find("transform")) {
     const json::Value* scale = transform->find("scale");
     if (scale != nullptr) {
       if (const json::Array* items = scale->array(); items != nullptr && !items->empty()) {
@@ -777,9 +796,32 @@ void Simulation::rebuild() {
   // fields, so they can be applied live without a structural rebuild. The tvOS
   // engine hard-codes this for `particle-ripples`; driving it from `affects`
   // generalises the same behaviour to every module.
+  //
+  // One expression is excluded: a live binding flattens every entity to a single
+  // value, while `styledEntity` evaluates the same expression per entity with a
+  // per-entity `random`. An expression reading `random` therefore has to stay
+  // baked, or applying it live would quietly erase the per-entity variation the
+  // module authored.
+  auto liveBindingIsSafe = [&module](const std::string& path) {
+    // `templates.<name>.render.<key>` is the only shape these paths take.
+    constexpr size_t kPrefix = sizeof("templates.") - 1;
+    if (path.compare(0, kPrefix, "templates.") != 0) return true;
+    const size_t nameEnd = path.find('.', kPrefix);
+    if (nameEnd == std::string::npos) return true;
+    const json::Value* entry = module.templateFor(path.substr(kPrefix, nameEnd - kPrefix));
+    if (entry == nullptr) return true;
+    const json::Value* render = entry->find("render");
+    if (render == nullptr) return true;
+    const json::Value* target = render->find(path.substr(path.rfind('.') + 1));
+    if (target == nullptr) return true;
+    return target->exprSource().find("random") == std::string::npos;
+  };
   for (const ModuleSetting& setting : module.settings()) {
     for (const std::string& path : setting.affects) {
-      if (path.find(".render.flareThreshold") != std::string::npos) {
+      if (!liveBindingIsSafe(path)) continue;
+      if (path.find(".render.dotSizePixels") != std::string::npos) {
+        liveFlareSettings_.emplace_back(LiveField::DotSizePixels, setting.id);
+      } else if (path.find(".render.flareThreshold") != std::string::npos) {
         liveFlareSettings_.emplace_back(LiveField::FlareThreshold, setting.id);
       } else if (path.find(".render.flareGlow") != std::string::npos) {
         liveFlareSettings_.emplace_back(LiveField::FlareGlow, setting.id);
@@ -1208,6 +1250,10 @@ SnapshotPtr Simulation::publish(Diagnostics diagnostics, double elapsedMilliseco
 
   auto snapshot = std::make_shared<SceneSnapshot>();
   snapshot->particles.reserve(entities_.size() * 2);
+  // Zeroed rather than merely sized: a cell outside the live extent is skipped
+  // below and never writes an entry, and a wire must not pick up last frame's
+  // size for it.
+  publishedSize_.assign(entities_.size(), 0.0f);
 
   const bool moduleUsesPalette = module_ != nullptr;
   for (size_t entityIndex = 0; entityIndex < entities_.size(); ++entityIndex) {
@@ -1237,6 +1283,9 @@ SnapshotPtr Simulation::publish(Diagnostics diagnostics, double elapsedMilliseco
     const float size = entity.size + energy * entity.energySize +
                        static_cast<float>(signal_.beatPulse) * entity.beatSize +
                        flare * entity.flareSize;
+    // Kept for the grid-wire pass below, which needs both of a wire's endpoints
+    // at the size they were actually drawn at.
+    publishedSize_[entityIndex] = size;
     const float glow = entity.glow + energy + flare * entity.flareGlow;
 
     RenderParticle particle;
@@ -1276,20 +1325,29 @@ SnapshotPtr Simulation::publish(Diagnostics diagnostics, double elapsedMilliseco
     const Vec4 lineStart = palette_.color(field.lineStartSlot);
     const Vec4 lineEnd = palette_.color(field.lineEndSlot);
     const size_t layerSize = static_cast<size_t>(field.columns) * static_cast<size_t>(field.rows);
+    // Half-width at one end of a wire, from the size that end's dot was drawn
+    // at -- the composed size, so a wire thickens where a ripple is passing
+    // rather than sitting at the field's uniform base size. The floor is what
+    // keeps a hairline lattice when the dots themselves are at zero.
+    auto endWidth = [this](size_t index) {
+      return std::max(0.0006f, publishedSize_[index] * 0.18f);
+    };
     auto appendLine = [&](size_t from, size_t to) {
       if (!field.contains(from) || !field.contains(to)) return;
-      const Entity& source = entities_[from];
       const Entity& destination = entities_[to];
       RenderParticle line;
+      // Two widths, because a wire tapers along its length between the two dots
+      // it connects: `positionSize.w` is the destination end, `meta.w` the
+      // source end, and the vertex shader interpolates between them on the same
+      // `progress` it already walks the line with.
       line.positionSize = Vec4{destination.position.x, destination.position.y,
-                               destination.position.z,
-                               std::max(0.0006f, std::min(source.size, destination.size) * 0.18f)};
+                               destination.position.z, endWidth(to)};
       line.color = lineStart;
       line.colorEnd = lineEnd;
       line.glowColor = lineStart;
       line.glowColorEnd = lineEnd;
-      line.meta = Vec4{0, 6, 0, 0};
-      const Vec3 delta = destination.position - source.position;
+      line.meta = Vec4{0, 6, 0, endWidth(from)};
+      const Vec3 delta = destination.position - entities_[from].position;
       line.trail = Vec4{delta.x, delta.y, delta.z, 1};
       snapshot->particles.push_back(line);
     };

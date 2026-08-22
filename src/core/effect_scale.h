@@ -83,6 +83,33 @@ inline SceneBlendMode sceneBlendModeFor(float blendValue) {
   return static_cast<SceneBlendMode>(static_cast<int>(std::floor(clamped + 0.5f)));
 }
 
+// Dot diameter in true device pixels, as a clip-space radius.
+//
+// This is the ONE place in the engine where an authored dot size meets the
+// output resolution, and it deliberately does NOT go through
+// `visualEffectScale` above. Every other pixel-sized quantity here is authored
+// against the 1080-line reference and MULTIPLIED by the ratio at denser outputs
+// so its visual weight stays constant; a dot is DIVIDED by the height instead.
+// A dot is an object with a size, not a weight. 50px is 50 real pixels at 1080p
+// and 50 real pixels at 4K, so it reads proportionally smaller on a denser
+// output. See `nova-visualiser-modules/specs/particle-grid-dot-size.md`.
+//
+// The identity that makes the divide exact: `particle.vert` sets local space to
+// `corner * effectScale` and the quad offset to `corner * positionSize.w *
+// effectScale`, so `offset = local * w`, and `particle.frag` cuts the core at
+// `|local| = 1`. The drawn core radius in clip is therefore `w` exactly,
+// whatever `effectScale` is. Clip Y spans `outputHeight` pixels, so a radius of
+// `w` is a DIAMETER of `w * outputHeight` pixels.
+//
+// The 200px rail is an order of magnitude above the module's declared 50, so a
+// corrupt setting cannot allocate a screen-filling quad per entity.
+inline constexpr float kMaxDotSizePixels = 200.0f;
+
+inline float dotSizeClip(float dotSizePixels, float outputHeight) {
+  const float pixels = std::max(0.0f, std::min(kMaxDotSizePixels, dotSizePixels));
+  return pixels / std::max(1.0f, outputHeight);
+}
+
 struct EffectDimensions {
   float scale = 1;
   float dotCore = 0;

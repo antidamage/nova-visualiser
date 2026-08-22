@@ -111,6 +111,16 @@ struct SimulationInput {
   double backgroundTransitionHold = 0.0;
   double backgroundTransitionRelease = 0.6;
   bool transitionPaused = false;
+  // The height in pixels of the picture the viewer actually sees, which is what
+  // a module's `dotSizePixels` is measured in. The encoder's configured output
+  // height, never an intermediate target: the glow blur runs at a quarter of it
+  // and the bloom at a fraction again, and none of that may change how many
+  // pixels wide a dot is.
+  //
+  // Defaults to the 1080-line authoring reference rather than to any particular
+  // host's output, so an unset input reproduces the authored picture -- which is
+  // exactly what the conformance runner wants.
+  double outputHeight = 1080.0;
   int reloadGeneration = 0;
 };
 
@@ -260,7 +270,7 @@ class Simulation {
   // Per-entity render fields a module setting may drive live, i.e. without a
   // structural rebuild. Discovered from each setting's `affects` paths, which
   // generalises what the tvOS engine hard-codes for `particle-ripples`.
-  enum class LiveField { FlareThreshold, FlareGlow, TrailLength, FlareSize, Glow };
+  enum class LiveField { FlareThreshold, FlareGlow, TrailLength, FlareSize, Glow, DotSizePixels };
 
   // A tiny deterministic LCG matching the tvOS `random()` closures.
   struct Random {
@@ -361,6 +371,9 @@ class Simulation {
   Palette targetPalette_ = Palette::defaults();
   double transitionDuration_ = 0.6;
   bool transitionPaused_ = false;
+  // Presentation height in pixels, the divisor for `render.dotSizePixels`. Not
+  // interpolated on the way in: a resolution change is a cut.
+  double outputHeight_ = 1080.0;
   int reloadGeneration_ = 0;
   std::string moduleKey_;
 
@@ -371,6 +384,11 @@ class Simulation {
   // per tick. Entities outside any gated field -- beat-emitted particles, every
   // ungated module -- are permanently 1.
   std::vector<uint8_t> entityLive_;
+  // Parallel to `entities_`: the size each entity was published at this frame,
+  // base plus its energy, beat and flare terms. The grid-wire pass runs after
+  // the entity loop and needs BOTH of a wire's endpoints at their drawn size, so
+  // it reads this rather than recomputing the composition twice per wire.
+  std::vector<float> publishedSize_;
   std::vector<FieldRange> fields_;
   std::vector<FieldWave> fieldWaves_;
   std::vector<uint64_t> visitedTokens_;

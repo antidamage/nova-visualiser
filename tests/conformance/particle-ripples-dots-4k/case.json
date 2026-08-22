@@ -1,0 +1,17 @@
+{
+  "module": "../particle-ripples-dots/module.json",
+  "bpm": 128,
+  "energy": 0.72,
+  "trackSeed": 20260803,
+  "outputHeight": 2160,
+  "sampleTicks": [1, 30, 120, 360, 720],
+  "note": "The other half of the dot-size pair, and the proof of the unit contract: same module, same settings, twice the output height. dot_size 12 must publish HALF the clip size it does in `particle-ripples-dots` -- 0.005556 rather than 0.011111 -- because a dot is authored in real device pixels and divided by the height, unlike every soft effect in core/effect_scale.h which is authored at 1080 lines and multiplied by the ratio. The two digests must therefore DIFFER. If they ever match, dot size has been routed through visualEffectScale and 50px no longer means 50 pixels.",
+  "settings": {
+    "complexity": 0.6, "intensity": 1.0, "fluid_speed": 0.65, "offset_magnifier": 13,
+    "strong_beat_multiplier": 1.65, "peak_threshold": 0.28, "peak_glow": 6.5,
+    "anticipation": 0.5, "ramp_up": 0.04, "release": 0.7, "flash_power": 3.8,
+    "trail_length": 7, "grid_wireframe": 1,
+    "grid_width": 1.0, "grid_height": 0.3333,
+    "dot_size": 12
+  }
+}

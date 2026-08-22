@@ -539,6 +539,15 @@ CaseResult runEffectScaleCase(const fs::path& directory, bool update, CaseResult
     mix(dimensions.trailWidth);
     mix(dimensions.bloomRadius);
     mix(dimensions.backgroundFeatureRadius);
+    // Dot size rides along here because it is the one pixel-sized quantity that
+    // moves the OTHER way with resolution: everything above is authored at 1080
+    // lines and multiplied by the ratio, while a `dotSizePixels` dot is in real
+    // device pixels and divided by the height. Digesting the two together is
+    // what catches a future change that quietly routes dot size through
+    // `visualEffectScale`.
+    for (double pixels : {0.0, 3.8, 12.0, 50.0, 200.0, 500.0}) {
+      mix(nova::dotSizeClip(static_cast<float>(pixels), static_cast<float>(height)));
+    }
     ++samples;
   }
 
@@ -1071,6 +1080,14 @@ CaseResult runCase(const fs::path& directory, bool update) {
   // Conformance runs with transitions settled so a case measures simulation
   // behaviour, not the theme chase.
   input.transitionPaused = true;
+  // Pinned, and defaulting to the 1080-line authoring reference rather than to
+  // whatever the host happens to render at. A module's `dotSizePixels` is in
+  // real device pixels, so the clip size a case publishes is a function of this
+  // number -- unpinned, every particle digest in the corpus would depend on the
+  // machine running it. A case overrides it to lock the 4K behaviour.
+  input.outputHeight = caseValue->find("outputHeight") != nullptr
+                           ? caseValue->find("outputHeight")->numberOr(1080)
+                           : 1080;
 
   if (const nova::json::Value* settings = caseValue->find("settings")) {
     if (const nova::json::Object* object = settings->object()) {

@@ -4,7 +4,7 @@
   "energy": 0.72,
   "trackSeed": 20260803,
   "sampleTicks": [1, 30, 120, 360, 720],
-  "note": "Locks the gated grid extent. Same module and signal as `particle-ripples`, but the lattice is driven to full height and 60% width instead of the authored one-third band. The gap is set by complexity alone, so this must come out as more rows at the SAME spacing -- if a future change stretches the field to fit instead of adding rows, the particle counts in expected.json move and this fails. Both counts are also parity-checked by ParitySelfTests.testGridExtentParity().",
+  "note": "Locks the gated grid extent. Same module and signal as `particle-ripples`, but the lattice is driven to full height and 60% width instead of the authored one-third band. The gap is set by complexity alone, so this must come out as more rows at the SAME spacing -- if a future change stretches the field to fit instead of adding rows, the particle counts in expected.json move and this fails. Both counts are also parity-checked by ParitySelfTests.testGridExtentParity(). Re-baselined when grid wires gained a second width: this is the only pre-existing case that draws wires (the other two set grid_wireframe 0), and its digest moved solely because a wire's `meta.w` went from 0 to its source-end half-width. The widths themselves did not change here -- this module authors energySize, beatSize and flareSize all at 0, so every dot is the same size and both ends of every wire come out equal.",
   "settings": {
     "complexity": 0.6, "intensity": 1.0, "fluid_speed": 0.65, "offset_magnifier": 13,
     "strong_beat_multiplier": 1.65, "peak_threshold": 0.28, "peak_glow": 6.5,
