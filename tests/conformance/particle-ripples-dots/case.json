@@ -1,0 +1,17 @@
+{
+  "module": "module.json",
+  "bpm": 128,
+  "energy": 0.72,
+  "trackSeed": 20260803,
+  "outputHeight": 1080,
+  "sampleTicks": [1, 30, 120, 360, 720],
+  "note": "Locks dot size as a TRUE DEVICE PIXEL quantity. `outputHeight` is pinned to the 1080-line authoring reference because the published clip size is dot_size / outputHeight -- unpinned, this digest would depend on the host. dot_size 12 at 1080 is 0.011111 clip, well clear of the 0.0035 the baked `transform.scale` gives, so a regression that fell back to the transform fails here rather than passing quietly; the fixture keeps `transform.scale` for exactly that reason. The grid wires follow the dots and now taper between their two endpoints' composed sizes, so this pins that contract too: at 12px the endpoints sit around 0.002 clip, above the 0.0006 floor. Paired with `particle-ripples-dots-4k`, which is the same case at twice the height and must produce half the clip size. Parity-checked by ParitySelfTests.testEffectScaleParity(), which digests the same clip formula.",
+  "settings": {
+    "complexity": 0.6, "intensity": 1.0, "fluid_speed": 0.65, "offset_magnifier": 13,
+    "strong_beat_multiplier": 1.65, "peak_threshold": 0.28, "peak_glow": 6.5,
+    "anticipation": 0.5, "ramp_up": 0.04, "release": 0.7, "flash_power": 3.8,
+    "trail_length": 7, "grid_wireframe": 1,
+    "grid_width": 1.0, "grid_height": 0.3333,
+    "dot_size": 12
+  }
+}

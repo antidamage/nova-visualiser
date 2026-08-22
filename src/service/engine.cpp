@@ -365,6 +365,10 @@ void Engine::publishSimulationInput() {
   input.driverInterpolatedSettings = snapshot.driverInterpolatedSettings;
   input.palette = snapshot.palette;
   input.transitionDuration = snapshot.transitionSeconds;
+  // What a module's `dotSizePixels` is counted in. The encoded output's height,
+  // not any per-pass target: the glow blur runs at a quarter of this and the
+  // bloom at a fraction again, and neither may change how wide a dot is.
+  input.outputHeight = static_cast<double>(options_.height);
   input.reloadGeneration = snapshot.reloadGeneration;
 
   // --- Nova-owned colour-theme selection -----------------------------------

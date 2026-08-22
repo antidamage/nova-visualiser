@@ -8,5 +8,5 @@
   "trailWidth": 0.012,
   "bloomRadius": 1.0,
   "backgroundFeatureRadius": 0.48,
-  "note": "Background radii are normalized band geometry and remain invariant; only pixel-sized soft effects scale with output density."
+  "note": "Background radii are normalized band geometry and remain invariant; only pixel-sized soft effects scale with output density. The digest also folds in dotSizeClip over 0, 3.8, 12, 50, 200 and 500px at each height -- dot size is the one pixel-sized quantity that moves the OTHER way, divided by the output height rather than multiplied by the 1080p ratio, and digesting the two together is what catches a change that quietly routes it through visualEffectScale."
 }
