@@ -173,10 +173,12 @@ CaseResult runCompositeCase(const fs::path& directory, bool update, CaseResult r
   return finishCase(std::move(result), directory, buffer, update);
 }
 
-// Backdrop-band-formula case. NOT a render test -- it evaluates
-// `backgroundBandReference()` over a grid of sample points and band geometries
-// and digests the result. `ParitySelfTests.testBackgroundBandParity()` evaluates
-// the identical grid on tvOS.
+// Backdrop-slot-formula case. NOT a render test -- it evaluates
+// `backgroundBandReference()` over a grid of sample points and band geometries,
+// then the backdrop's TRANSITION rules over every combination of occupants and
+// authored modes, and digests both together.
+// `ParitySelfTests.testBackgroundBandParity()` evaluates the identical grids on
+// tvOS. See specs/backdrop-transitions.md for the transition half.
 //
 // The band used to be a hardcoded 1/3 constant here and a SwiftUI frame there,
 // with the vignette as five magic numbers in each shader. Now that all four of
@@ -246,6 +248,62 @@ CaseResult runBackgroundBandCase(const fs::path& directory, bool update, CaseRes
         }
       }
     }
+  }
+
+  // The backdrop slot's TRANSITIONS, on the same digest.
+  //
+  // The band above is one occupant of the slot and a background image is the
+  // other, and the rule for changing between them is the second thing the two
+  // shaders have to agree on. It is locked here rather than in its own case
+  // because it is the same slot and the same header: a change that broke the
+  // band's framing would break the dissolve's endpoints too, and one digest
+  // failing for both is the honest signal.
+  //
+  // Both occupancies on both sides, every authored mode including the two the
+  // field ignores, and progress across both ends -- 0 and 1 matter as much as
+  // the middle, because the ends are what must stay pixel-identical to the
+  // picture each occupant draws alone.
+  const std::vector<double> progresses =
+      numbers("transitionProgresses", {0.0, 0.25, 0.5, 0.75, 1.0});
+  // Stands in for the two finished, framed pictures. Distinct enough that a mix
+  // written the wrong way round is visible in the digest.
+  const nova::Vec4 leavingPicture{0.62f, 0.48f, 0.71f, 1.0f};
+  const nova::Vec4 arrivingPicture{0.13f, 0.55f, 0.29f, 1.0f};
+  // A half-covered premultiplied plane, which is what a fitted image's edge
+  // actually looks like, over a backdrop that is not black.
+  const nova::Vec4 plane{0.21f, 0.09f, 0.34f, 0.5f};
+  const nova::Vec3 imageBackdrop{0.06f, 0.02f, 0.14f};
+  for (int toIsImage = 0; toIsImage < 2; ++toIsImage) {
+    for (int fromIsImage = 0; fromIsImage < 2; ++fromIsImage) {
+      for (int mode = 0; mode <= 2; ++mode) {
+        const nova::CentreTransition authored =
+            nova::centreTransitionFor(static_cast<double>(mode));
+        const bool swaps =
+            nova::backdropSwapsPlanes(toIsImage != 0, fromIsImage != 0, authored);
+        const nova::CentreTransition applied =
+            nova::backdropTransitionMode(toIsImage != 0, fromIsImage != 0, authored);
+        mix(swaps ? 1.0f : 0.0f);
+        mix(static_cast<float>(static_cast<int>(applied)));
+        ++samples;
+        for (double progress : progresses) {
+          const nova::Vec4 dissolved = nova::backdropDissolve(leavingPicture, arrivingPicture,
+                                                              static_cast<float>(progress));
+          mix(dissolved.x);
+          mix(dissolved.y);
+          mix(dissolved.z);
+          mix(dissolved.w);
+          ++samples;
+        }
+      }
+    }
+  }
+  {
+    const nova::Vec4 over = nova::backdropImageOver(plane, imageBackdrop);
+    mix(over.x);
+    mix(over.y);
+    mix(over.z);
+    mix(over.w);
+    ++samples;
   }
 
   char buffer[64];

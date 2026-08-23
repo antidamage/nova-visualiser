@@ -341,8 +341,12 @@ class Simulation {
   bool centreProportional_ = true;
   double messageScale_ = 1.0;
   // The backdrop slot, mirroring the centre's above: what is showing, what is
-  // leaving, and how far through the change it is. Null in both means the
-  // procedural field is the backdrop.
+  // leaving, and how far through the change it is.
+  //
+  // Null is an OCCUPANT here, not an absence: it means the procedural field.
+  // So a null `backgroundImagePrev_` with a fade below 1 is a real transition
+  // whose outgoing side is the field, and null in both with a fade of 1 is the
+  // field simply showing. See specs/backdrop-transitions.md.
   std::shared_ptr<const DecodedImage> backgroundImage_;
   std::shared_ptr<const DecodedImage> backgroundImagePrev_;
   double backgroundImageFade_ = 1.0;

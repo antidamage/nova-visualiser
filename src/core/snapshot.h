@@ -72,6 +72,10 @@ struct SceneSnapshot {
   // change. Null in both is the procedural field: the two are one slot with two
   // possible occupants, not a picture layered over a field. Drawn inside the
   // backdrop pass, which is what puts it UNDER the vignette.
+  //
+  // Null is an occupant on EITHER side, so a null `backgroundImageFrom` while
+  // `backgroundImageFade` is below 1 means the field is what this change is
+  // dissolving away from. See specs/backdrop-transitions.md.
   std::shared_ptr<const DecodedImage> backgroundImage;
   std::shared_ptr<const DecodedImage> backgroundImageFrom;
   float backgroundImageFade = 1.0f;

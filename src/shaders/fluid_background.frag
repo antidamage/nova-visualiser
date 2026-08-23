@@ -72,6 +72,19 @@ uniform float imageAxisRadians;
 uniform int imageSegments;
 uniform int imageReturnOrigin;
 uniform float frameAspect;
+// Whether the MODULE declares the blob field, which is what decides what the
+// backdrop's other occupant actually looks like: the animated band when it
+// does, and the flat composite backdrop colour when it does not.
+//
+// Distinct from "this pass is running". The pass also runs for a module with no
+// field whenever a background image is showing or leaving, and during that
+// change the picture has to dissolve toward the same flat colour the composite
+// would otherwise have drawn -- otherwise a band nobody asked for appears for
+// the length of the transition and pops out at the end.
+uniform int hasField;
+// The composite's own backdrop term, premultiplied here to match
+// `composite.frag` exactly: colour times coverage, coverage carried alongside.
+uniform vec4 fieldFallback;
 // The colour an uncovered part of the frame falls back to, so a fitted image
 // smaller than the band has something defined behind it rather than a hole.
 uniform vec3 imageBackdrop;
@@ -123,16 +136,22 @@ float peakField(vec2 p, vec2 center, float radius, float seed, float warp, float
 // core/centre_image_transition.h with a conformance case locking it. `uv` here
 // is already in the top-left-origin frame space the rest of this shader works
 // in, which is the one difference -- the centre pass flips at the end instead.
-vec4 imagePlane(sampler2D image, vec2 halfExtent, bool incoming, vec2 frameUv) {
+//
+// `mode` is a parameter rather than the `imageMode` uniform read directly,
+// because the mode that applies is not always the one that was authored: a
+// change whose other occupant is the procedural field is always a cross-fade,
+// since a field has no rectangle to flip or slide. See
+// specs/backdrop-transitions.md.
+vec4 imagePlane(sampler2D image, vec2 halfExtent, bool incoming, vec2 frameUv, int mode) {
   if (halfExtent.x <= 0.0 || halfExtent.y <= 0.0) return vec4(0.0);
 
   vec2 centred = (frameUv - vec2(0.5)) * vec2(frameAspect, 1.0);
-  if (imageMode != MODE_CROSSFADE) {
+  if (mode != MODE_CROSSFADE) {
     vec2 along = vec2(cos(imageAxisRadians), sin(imageAxisRadians));
     vec2 across = vec2(-along.y, along.x);
     vec2 local = vec2(dot(centred, along), dot(centred, across));
 
-    if (imageMode == MODE_FLIP) {
+    if (mode == MODE_FLIP) {
       float collapse = abs(cos(PI * clamp(imageProgress, 0.0, 1.0)));
       if (collapse < FLIP_EPSILON) return vec4(0.0);
       local.x /= collapse;
@@ -174,33 +193,23 @@ vec4 imagePlane(sampler2D image, vec2 halfExtent, bool incoming, vec2 frameUv) {
   return texture(image, texel);
 }
 
-// The background image as one premultiplied colour, transitions resolved.
+// ONE image occupant of the backdrop slot, as a finished, framed picture.
 //
-// Mirrors main() in centre_image.frag: a flip and a slide draw exactly ONE
-// plane, swapping at the midpoint, and only a cross-fade draws both. Where
-// nothing covers, the theme's backdrop colour shows through, so a fitted image
+// The plane over the theme's backdrop colour, then the vignette closed over the
+// whole frame -- with an image there is no band, so the fit IS the geometry.
+// Where nothing covers, the backdrop colour shows through, so a fitted image
 // smaller than the frame sits on the palette rather than on a hole.
-vec3 imageField(vec2 frameUv) {
-  vec4 accumulated = vec4(0.0);
-  float weight = clamp(imageProgress, 0.0, 1.0);
+//
+// Returned finished rather than as a colour to be blended later, because the
+// other occupant is framed on entirely different terms (band-local) and the two
+// framings are cross-dissolved rather than reconciled. See
+// specs/backdrop-transitions.md.
+vec4 imageOccupant(sampler2D image, vec2 halfExtent, bool incoming, vec2 frameUv, int mode);
 
-  if (imageMode != MODE_CROSSFADE && hasImageFrom != 0) {
-    accumulated = weight >= 0.5
-      ? imagePlane(imageTo, imageHalfExtentTo, true, frameUv)
-      : imagePlane(imageFrom, imageHalfExtentFrom, false, frameUv);
-  } else {
-    accumulated = imagePlane(imageTo, imageHalfExtentTo, true, frameUv) * weight;
-    if (hasImageFrom != 0) {
-      accumulated += imagePlane(imageFrom, imageHalfExtentFrom, false, frameUv) * (1.0 - weight);
-    }
-  }
-
-  // Both planes are premultiplied at decode time, so this IS the source-over
-  // term -- not a mix, which would darken the image by its own coverage a
-  // second time.
-  float coverage = clamp(accumulated.a, 0.0, 1.0);
-  return accumulated.rgb + imageBackdrop * (1.0 - coverage);
-}
+// The OTHER occupant of the backdrop slot, as a finished, framed picture: the
+// blob field clipped into its band, or -- for a module that never declared a
+// field -- the flat colour the composite draws when this pass is off.
+vec4 fieldOccupant(vec2 frameUv);
 
 // The frame the backdrop is drawn into: the four edge gradients, then the band's
 // soft clip into the bars around it.
@@ -239,20 +248,31 @@ vec3 framedBackdrop(vec3 color, vec2 local, float inBand) {
   return mix(vignetteColor, shaded, inBand);
 }
 
-void main() {
-  // GL's framebuffer origin is bottom-left and SwiftUI's is top-left. Flip here
-  // rather than in the composite, so the blob motion matches the local engine
-  // frame for frame when the two are compared side by side.
-  vec2 frameUv = vec2(uv.x, 1.0 - uv.y);
-
+vec4 imageOccupant(sampler2D image, vec2 halfExtent, bool incoming, vec2 frameUv, int mode) {
+  vec4 plane = imagePlane(image, halfExtent, incoming, frameUv, mode);
+  // The plane is premultiplied at decode time, so this IS the source-over term
+  // -- not a mix, which would darken the image by its own coverage a second
+  // time.
+  float coverage = clamp(plane.a, 0.0, 1.0);
+  vec3 over = plane.rgb + imageBackdrop * (1.0 - coverage);
   // A background image REPLACES the field rather than layering over it, and it
   // brings its own geometry with it: the width, height and scale sized the band
   // when the band was the backdrop, and they size the IMAGE when the image is.
   // So there is no band to clip here -- the fitted rectangle is the geometry,
   // and the vignette closes over the whole frame around it.
-  if (hasImage != 0) {
-    outColor = vec4(framedBackdrop(imageField(frameUv), frameUv, 1.0), 1.0);
-    return;
+  return vec4(framedBackdrop(over, frameUv, 1.0), 1.0);
+}
+
+vec4 fieldOccupant(vec2 frameUv) {
+  // A module that never declared the blob field has no band to draw. What shows
+  // instead is exactly what `composite.frag` draws with `useFluid` off -- the
+  // flat backdrop colour, premultiplied by its own coverage -- so that a
+  // background image dissolving away lands on the picture that was really
+  // there, rather than on a band that appears for the length of the transition
+  // and pops out at the end.
+  if (hasField == 0) {
+    float coverage = clamp(fieldFallback.a, 0.0, 1.0);
+    return vec4(fieldFallback.rgb * coverage, coverage);
   }
 
   // Band-local coordinates. The band is centred on both axes.
@@ -274,8 +294,7 @@ void main() {
     // composite has a defined backdrop everywhere -- which is what lets the
     // scene blend modes mean something across the whole frame. Premultiplied,
     // so the colour is already the output.
-    outColor = vec4(vignetteColor, 1.0);
-    return;
+    return vec4(vignetteColor, 1.0);
   }
 
   // The field is computed in the band's own aspect, because that is the
@@ -329,5 +348,66 @@ void main() {
   color = min(color, cap);
   color = clamp(color, 0.0, 1.0);
 
-  outColor = vec4(framedBackdrop(color, vec2(bandUv.x, bandLocalY), inBand), 1.0);
+  return vec4(framedBackdrop(color, vec2(bandUv.x, bandLocalY), inBand), 1.0);
+}
+
+void main() {
+  // GL's framebuffer origin is bottom-left and SwiftUI's is top-left. Flip here
+  // rather than in the composite, so the blob motion matches the local engine
+  // frame for frame when the two are compared side by side.
+  vec2 frameUv = vec2(uv.x, 1.0 - uv.y);
+
+  // The backdrop is ONE slot with two possible occupants, and a change between
+  // any two of them is a transition on the authored ramp. A null image on
+  // either side is the FIELD occupant, not an absence -- which is what makes
+  // "no background" -> "a background" a real change rather than a cut.
+  // specs/backdrop-transitions.md is the authority; this mirrors
+  // `fluidBackgroundFragment` in FluidBackgroundShader.metal.
+  bool toIsImage = hasImage != 0;
+  bool fromIsImage = hasImageFrom != 0;
+  float weight = clamp(imageProgress, 0.0, 1.0);
+
+  // Image -> image under a flip or a slide draws exactly ONE plane, swapping at
+  // the exact midpoint. That instant is what makes a flip read as one object
+  // turning over rather than two images blending through each other.
+  if (toIsImage && fromIsImage && imageMode != MODE_CROSSFADE) {
+    outColor = weight >= 0.5
+      ? imageOccupant(imageTo, imageHalfExtentTo, true, frameUv, imageMode)
+      : imageOccupant(imageFrom, imageHalfExtentFrom, false, frameUv, imageMode);
+    return;
+  }
+
+  // Everything else is a cross-dissolve of two finished, framed pictures. The
+  // geometry is always the cross-fade's here: either both sides are images
+  // under an authored cross-fade, or one side is the field -- and a field has
+  // no rectangle to flip or slide, so the mode is ignored rather than
+  // half-applied.
+  //
+  // Framings are dissolved, not reconciled: an image is framed whole-frame and
+  // the band is framed band-locally, and mixing the two finished results is
+  // what keeps both endpoints pixel-identical to the picture each occupant
+  // draws on its own.
+  //
+  // The ends short-circuit so a steady backdrop costs exactly what it cost
+  // before any of this existed -- one occupant, evaluated once.
+  if (weight >= 1.0) {
+    outColor = toIsImage
+      ? imageOccupant(imageTo, imageHalfExtentTo, true, frameUv, MODE_CROSSFADE)
+      : fieldOccupant(frameUv);
+    return;
+  }
+  if (weight <= 0.0) {
+    outColor = fromIsImage
+      ? imageOccupant(imageFrom, imageHalfExtentFrom, false, frameUv, MODE_CROSSFADE)
+      : fieldOccupant(frameUv);
+    return;
+  }
+
+  vec4 leaving = fromIsImage
+    ? imageOccupant(imageFrom, imageHalfExtentFrom, false, frameUv, MODE_CROSSFADE)
+    : fieldOccupant(frameUv);
+  vec4 arriving = toIsImage
+    ? imageOccupant(imageTo, imageHalfExtentTo, true, frameUv, MODE_CROSSFADE)
+    : fieldOccupant(frameUv);
+  outColor = mix(leaving, arriving, weight);
 }
