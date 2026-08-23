@@ -134,9 +134,14 @@ void Simulation::ingest() {
     centreImageFade_ = (centreImagePrev_ && length > 0.0) ? 0.0 : 1.0;
   }
 
-  // The backdrop slot, on exactly the same terms and for the same reasons. No
-  // message clause: nothing overrides the backdrop, so this is simply whether
-  // the live theme supplies an image. Null means the procedural field draws.
+  // The backdrop slot. Like the centre's above in how it latches, and unlike it
+  // in one way that matters: no message clause, and NULL IS AN OCCUPANT.
+  //
+  // The backdrop is one slot with two possible occupants -- a background image,
+  // or the procedural field -- so a null here means "the field draws", not
+  // "nothing draws". That makes a change to or from null a change of occupant
+  // exactly like a change from one image to another, and it gets the same
+  // transition. See specs/backdrop-transitions.md.
   if (next.backgroundImage != backgroundImage_) {
     backgroundImagePrev_ = backgroundImage_;
     backgroundImage_ = next.backgroundImage;
@@ -147,7 +152,17 @@ void Simulation::ingest() {
     backgroundTransitionRelease_ = std::max(0.0, next.backgroundTransitionRelease);
     const double length = backgroundTransitionAttack_ + backgroundTransitionHold_
                           + backgroundTransitionRelease_;
-    backgroundImageFade_ = (backgroundImagePrev_ && length > 0.0) ? 0.0 : 1.0;
+    // Only the ramp's length decides whether this is a transition or a cut.
+    // Deliberately NOT the centre's `prev &&` test: there is always something
+    // leaving, because the field is what shows when no image does, and gating
+    // on an outgoing image is what made "no background" -> "a background" cut
+    // instantly however long the ramp was.
+    //
+    // The first paint dissolves for the same reason. The centre slot has
+    // nothing behind it, so flying its first image on would be inventing a
+    // change that did not happen; the backdrop genuinely has the field on
+    // screen before the first image arrives, so fading it out is honest.
+    backgroundImageFade_ = length > 0.0 ? 0.0 : 1.0;
   }
 
   // Authored as a percentage, held as a fraction -- the same convention the
@@ -242,6 +257,12 @@ void Simulation::advanceConfiguration(double delta) {
   // The backdrop's, on its own clock and its own ramp: the two slots change at
   // the same moment but run independently, so the backdrop can still be
   // dissolving after the centrepiece has landed.
+  //
+  // `backgroundImagePrev_` may legitimately be null all the way through this --
+  // that is a change whose outgoing occupant is the procedural field. The
+  // renderer reads it the same way: no outgoing image means the field is what
+  // is leaving, which is why this needs no separate "is a transition running"
+  // flag. A fade below 1 IS the transition running.
   if (backgroundImageFade_ < 1.0) {
     backgroundImageFadeSeconds_ += delta;
     backgroundImageFade_ = transitionRamp(static_cast<float>(backgroundImageFadeSeconds_),

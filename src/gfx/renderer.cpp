@@ -161,6 +161,8 @@ bool Renderer::initialise(int width, int height, std::string& error) {
   fluidUniforms_.imageReturnOrigin = glGetUniformLocation(fluidProgram_, "imageReturnOrigin");
   fluidUniforms_.frameAspect = glGetUniformLocation(fluidProgram_, "frameAspect");
   fluidUniforms_.imageBackdrop = glGetUniformLocation(fluidProgram_, "imageBackdrop");
+  fluidUniforms_.hasField = glGetUniformLocation(fluidProgram_, "hasField");
+  fluidUniforms_.fieldFallback = glGetUniformLocation(fluidProgram_, "fieldFallback");
   downsampleTexel_ = glGetUniformLocation(downsampleProgram_, "texelSize");
   upsampleTexel_ = glGetUniformLocation(upsampleProgram_, "texelSize");
   upsampleRadius_ = glGetUniformLocation(upsampleProgram_, "radius");
@@ -398,6 +400,13 @@ void Renderer::renderFluidBackground(double time) {
   // hole the composite would have to invent something for.
   glUniform3f(fluidUniforms_.imageBackdrop, fluid_.background.x, fluid_.background.y,
               fluid_.background.z);
+  // The backdrop's other occupant. `field` is the MODULE's declaration, not
+  // "this pass is running" -- see FluidBackground in renderer.h -- and the
+  // fallback is the composite's own backdrop term, which is what the picture
+  // dissolves to and from when there is no band to dissolve to.
+  glUniform1i(fluidUniforms_.hasField, fluid_.field ? 1 : 0);
+  glUniform4f(fluidUniforms_.fieldFallback, fluid_.fallback.x, fluid_.fallback.y,
+              fluid_.fallback.z, fluid_.fallback.w);
 
   glBindVertexArray(vao_);
   glDrawArrays(GL_TRIANGLES, 0, 3);

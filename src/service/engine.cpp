@@ -744,7 +744,13 @@ void Engine::renderLoop() {
     // reads the config snapshot at all.
     if (frameIndex % 30 == 0) {
       const net::ConfigSnapshot configSnapshot = config_.snapshot();
-      fluidSettings.enabled = configSnapshot.valid && configSnapshot.usesFluidBackground;
+      // The MODULE's declaration. `enabled` is resolved from this plus the
+      // image state further down, because a theme's picture is not the module's
+      // business -- but which occupant the backdrop's non-image side actually
+      // has IS the module's business, and the two questions came apart when a
+      // change to or from "no background" became a real transition.
+      fluidSettings.field = configSnapshot.valid && configSnapshot.usesFluidBackground;
+      fluidSettings.enabled = fluidSettings.field;
       const net::FluidThemeSettings& theme = configSnapshot.fluidTheme;
       fluidSettings.peakIntensity = theme.peakIntensity;
       fluidSettings.falloffPower = theme.falloffPower;
@@ -776,7 +782,7 @@ void Engine::renderLoop() {
     // with no fluid field simply never drew.
     fluidSettings.image = latest->backgroundImage;
     fluidSettings.imageFrom = latest->backgroundImageFrom;
-    fluidSettings.enabled = fluidSettings.enabled || latest->backgroundImage != nullptr
+    fluidSettings.enabled = fluidSettings.field || latest->backgroundImage != nullptr
                             || latest->backgroundImageFrom != nullptr;
     if (fluidSettings.enabled) {
       fluidPhaseForStatus_.store(renderer_.fluidPhase());
@@ -796,6 +802,12 @@ void Engine::renderLoop() {
       fluidSettings.vignette = latest->vignetteColor;
       fluidSettings.vignetteOpacity = latest->vignetteOpacity;
       fluidSettings.vignetteSize = latest->vignetteSize;
+      // The composite's own backdrop term, so that under a module with no blob
+      // field an image can dissolve to and from the flat colour that really was
+      // there. `background`, not `fluidBackground`: the composite draws the
+      // energy-mixed one, and landing on anything else would show as a step at
+      // the end of the transition.
+      fluidSettings.fallback = latest->background;
     }
     renderer_.setFluidBackground(fluidSettings);
 
@@ -1558,7 +1570,9 @@ bool Engine::dumpFrame(const std::string& path, std::string& error) {
   // to include the animated backdrop. Without this it would render the module
   // over a flat colour and "look wrong" in exactly the way being investigated.
   gfx::Renderer::FluidBackground fluid;
-  fluid.enabled = configSnapshot.usesFluidBackground;
+  fluid.field = configSnapshot.usesFluidBackground;
+  fluid.enabled = fluid.field;
+  fluid.fallback = latest->background;
   if (fluid.enabled) {
     auto setting = configSnapshot.settings.find("fluid_speed");
     if (setting != configSnapshot.settings.end()) {

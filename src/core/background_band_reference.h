@@ -25,6 +25,7 @@
 
 #include <algorithm>
 
+#include "core/centre_image_transition.h"
 #include "core/vec.h"
 
 namespace nova {
@@ -129,6 +130,59 @@ inline BackgroundBandOutput backgroundBandReference(const BackgroundBandInput& i
                channel(in.fieldColor.y, in.vignetteColor.y),
                channel(in.fieldColor.z, in.vignetteColor.z), 1.0f};
   return out;
+}
+
+// ---------------------------------------------------------------------------
+// The backdrop slot's transitions.
+//
+// The band above is one OCCUPANT of the backdrop slot; a background image is the
+// other. What follows is the rule for changing between them, which is the second
+// thing the two shaders have to agree on and the one that actually drifted:
+// nothing here existed while a change to or from "no background" was a cut.
+//
+// specs/backdrop-transitions.md is the prose; this is the arithmetic.
+// ---------------------------------------------------------------------------
+
+// Whether a change draws exactly ONE plane, swapping at the midpoint, rather
+// than dissolving two.
+//
+// True only for image -> image under a flip or a slide. A change with the field
+// on either side is always a cross-dissolve however the mode axis was authored:
+// a field has no rectangle to flip or slide, so the mode is ignored rather than
+// half-applied.
+inline bool backdropSwapsPlanes(bool toIsImage, bool fromIsImage, CentreTransition authored) {
+  return toIsImage && fromIsImage && authored != CentreTransition::CrossFade;
+}
+
+// Which geometry the image planes are sampled with. The authored mode when both
+// sides are images, and a cross-fade whenever the field is involved.
+inline CentreTransition backdropTransitionMode(bool toIsImage, bool fromIsImage,
+                                               CentreTransition authored) {
+  return (toIsImage && fromIsImage) ? authored : CentreTransition::CrossFade;
+}
+
+// The dissolve itself: two FINISHED, framed pictures mixed by the ramp.
+//
+// Deliberately not a reconciliation of the two framings. An image is framed over
+// the whole frame and the band is framed band-locally, and mixing the finished
+// results is what keeps both ends pixel-identical to the picture each occupant
+// draws on its own -- which is the property that lets every other conformance
+// case stay unchanged.
+inline Vec4 backdropDissolve(const Vec4& leaving, const Vec4& arriving, float progress) {
+  const float w = clampValue(progress, 0.0f, 1.0f);
+  return {leaving.x + (arriving.x - leaving.x) * w, leaving.y + (arriving.y - leaving.y) * w,
+          leaving.z + (arriving.z - leaving.z) * w, leaving.w + (arriving.w - leaving.w) * w};
+}
+
+// One image occupant's colour before framing: the premultiplied plane over the
+// theme's backdrop colour. Stated here because the SOURCE-OVER is the part that
+// invites being written as a mix, which would darken the image by its own
+// coverage a second time.
+inline Vec4 backdropImageOver(const Vec4& premultipliedPlane, const Vec3& backdrop) {
+  const float coverage = clampValue(premultipliedPlane.w, 0.0f, 1.0f);
+  return {premultipliedPlane.x + backdrop.x * (1.0f - coverage),
+          premultipliedPlane.y + backdrop.y * (1.0f - coverage),
+          premultipliedPlane.z + backdrop.z * (1.0f - coverage), 1.0f};
 }
 
 }  // namespace nova

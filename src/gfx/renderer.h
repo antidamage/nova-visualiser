@@ -66,7 +66,17 @@ class Renderer {
   // id: a module opts in by declaring a setting that affects
   // `renderer.fluidBackground.speed`.
   struct FluidBackground {
+    // Whether this pass runs at all. True when the module declares the field OR
+    // when a background image is showing or still leaving -- a theme's picture
+    // is not the module's business.
     bool enabled = false;
+    // Whether the MODULE declares the blob field, which is a different question
+    // and the one that decides what the backdrop's non-image occupant looks
+    // like: the animated band when it does, and the flat composite backdrop
+    // colour when it does not. Without the distinction, an image dissolving
+    // away under a fieldless module would fade into a band that appears for the
+    // length of the transition and pops out at the end.
+    bool field = false;
     float speed = 0.65f;
     float peakIntensity = 1.0f;
     float falloffPower = 1.6f;
@@ -101,6 +111,10 @@ class Renderer {
     Vec4 accent{0, 0, 0, 1};
     Vec4 highlight{0, 0, 0, 1};
     Vec4 vignette{0, 0, 0, 1};
+    // The COMPOSITE's backdrop colour -- `SceneSnapshot::background`, which is
+    // energy-mixed and so is not `background` above. Only read when `field` is
+    // false, where it is what the backdrop dissolves to and from.
+    Vec4 fallback{0, 0, 0, 1};
   };
   void setFluidBackground(const FluidBackground& settings) { fluid_ = settings; }
 
@@ -263,6 +277,10 @@ class Renderer {
     int imageReturnOrigin = -1;
     int frameAspect = -1;
     int imageBackdrop = -1;
+    // The backdrop's OTHER occupant: whether the module declares the blob
+    // field, and the flat colour that stands in for it when it does not.
+    int hasField = -1;
+    int fieldFallback = -1;
   };
   FluidUniforms fluidUniforms_;
   EncodeUniforms p010Uniforms_;
