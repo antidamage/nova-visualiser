@@ -163,7 +163,11 @@ class ConfigClient {
   ConfigClient() = default;
   ~ConfigClient();
 
-  // `baseUrl` is the dashboard origin, e.g. http://127.0.0.1.
+  // `baseUrl` is the dashboard's OWN listener -- 127.0.0.1:3001 by default,
+  // the address Caddy itself proxies to -- and never its browser ingress.
+  // http://127.0.0.1 is answered by Caddy with an empty 200, which reads here
+  // as a configuration that did not parse and leaves the renderer with no
+  // module to draw.
   void start(std::string baseUrl, double pollSeconds);
   void stop();
 
@@ -198,6 +202,8 @@ class ConfigClient {
   std::shared_ptr<const Module> loadModule(const std::string& id, const std::string& version,
                                            const std::string& hash);
 
+  // Written once, in `start()`, before any worker thread exists, and never
+  // again -- which is why the log lines below may read it without the lock.
   std::string baseUrl_;
   std::thread thread_;
   std::atomic<bool> running_{false};

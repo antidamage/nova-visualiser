@@ -71,6 +71,38 @@ Driver driverFrom(const json::Value* value) {
   return driver;
 }
 
+// Records a configuration failure and logs the transition.
+//
+// Once, not every poll: this runs on a timer, and a line per attempt buries the
+// moment the picture went blank under hundreds that repeat it. Silence is what
+// let a renderer sit here for weeks encoding a flat frame with nothing to say for
+// itself.
+void reportConfigError(std::string& lastError, std::string message,
+                       const std::string& baseUrl) {
+  if (lastError == message) return;
+  lastError = message;
+  std::fprintf(stderr, "nova-visualiser: %s (dashboard %s)\n", lastError.c_str(),
+               baseUrl.c_str());
+}
+
+// The other half of the same transition. Returns true when there was something
+// to clear; called with the lock held, so the line is written by the caller,
+// outside it.
+bool clearConfigError(std::string& lastError) {
+  const bool cleared = !lastError.empty();
+  lastError.clear();
+  return cleared;
+}
+
+// `outcome` distinguishes a document that was fetched and committed from a
+// server confirming that the copy already held is current. Both end a failure,
+// but only one of them read anything, and a line claiming a read that did not
+// happen is the kind of half-true signal this whole path exists to stop.
+void logConfigRecovered(const std::string& baseUrl, const char* outcome) {
+  std::fprintf(stderr, "nova-visualiser: configuration %s on %s\n", outcome,
+               baseUrl.c_str());
+}
+
 }  // namespace
 
 ConfigClient::~ConfigClient() { stop(); }
@@ -213,16 +245,17 @@ std::shared_ptr<const Module> ConfigClient::loadModule(const std::string& id,
   const HttpResponse response =
       httpGet(baseUrl_ + "/api/phonoscope/modules/" + id + "/" + version + "/compiled");
   if (!response.ok()) {
+    const std::string message =
+        "module fetch failed: " +
+        (response.error.empty() ? std::to_string(response.status) : response.error);
     std::lock_guard<std::mutex> lock(mutex_);
-    lastError_ = "module fetch failed: " + (response.error.empty()
-                                                ? std::to_string(response.status)
-                                                : response.error);
+    reportConfigError(lastError_, message, baseUrl_);
     return nullptr;
   }
   auto module = Module::parse(response.body);
   if (!module) {
     std::lock_guard<std::mutex> lock(mutex_);
-    lastError_ = "compiled module " + key + " did not decode";
+    reportConfigError(lastError_, "compiled module " + key + " did not decode", baseUrl_);
     return nullptr;
   }
 
@@ -276,24 +309,52 @@ bool ConfigClient::refreshConfiguration() {
   }
 
   const HttpResponse response = httpGet(baseUrl_ + "/api/phonoscope/config", headers);
-  if (response.status == 304) return true;
+  // A 304 is a successful read -- the server confirming that the copy already
+  // held is current -- so it has to clear a recorded failure. Without this, a
+  // fetch that failed once and was then answered 304 keeps reporting a failure
+  // that ended minutes ago, which is the one channel that is supposed to say why
+  // the picture is blank.
+  if (response.status == 304) {
+    bool recovered = false;
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      recovered = clearConfigError(lastError_);
+    }
+    if (recovered) logConfigRecovered(baseUrl_, "confirmed unchanged");
+    return true;
+  }
   if (!response.ok()) {
+    const std::string message =
+        "config fetch failed: " +
+        (response.error.empty() ? std::to_string(response.status) : response.error);
     std::lock_guard<std::mutex> lock(mutex_);
-    lastError_ = "config fetch failed: " +
-                 (response.error.empty() ? std::to_string(response.status) : response.error);
+    reportConfigError(lastError_, message, baseUrl_);
+    return false;
+  }
+
+  // A 200 with an empty body is what an ingress answers when it does not
+  // recognise the Host it was addressed as, and it is indistinguishable from
+  // success at the transport layer. Say so, rather than reporting a parse
+  // failure that sends the reader looking at the JSON.
+  if (response.body.empty()) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    reportConfigError(lastError_,
+                      "config response was empty: 200 with no body (is this the "
+                      "dashboard's own listener, rather than its browser ingress?)",
+                      baseUrl_);
     return false;
   }
 
   auto envelope = json::Value::parse(response.body);
   if (!envelope) {
     std::lock_guard<std::mutex> lock(mutex_);
-    lastError_ = "config response did not parse";
+    reportConfigError(lastError_, "config response did not parse", baseUrl_);
     return false;
   }
   const json::Value* config = envelope->find("config");
   if (config == nullptr) {
     std::lock_guard<std::mutex> lock(mutex_);
-    lastError_ = "config response had no config object";
+    reportConfigError(lastError_, "config response had no config object", baseUrl_);
     return false;
   }
 
@@ -334,7 +395,7 @@ bool ConfigClient::refreshConfiguration() {
 
   if (next.activeModuleId.empty() || next.activeModuleVersion.empty()) {
     std::lock_guard<std::mutex> lock(mutex_);
-    lastError_ = "config names no active module";
+    reportConfigError(lastError_, "config names no active module", baseUrl_);
     return false;
   }
   std::string activeModuleHash;
@@ -643,6 +704,7 @@ bool ConfigClient::refreshConfiguration() {
   }
 
   next.valid = true;
+  bool recovered = false;
   {
     std::lock_guard<std::mutex> lock(mutex_);
     next.fluidTheme = fluidTheme_;
@@ -679,9 +741,10 @@ bool ConfigClient::refreshConfiguration() {
     }
     auto etag = response.headers.find("etag");
     configEtag_ = etag != response.headers.end() ? etag->second : std::string();
-    lastError_.clear();
+    recovered = clearConfigError(lastError_);
     revision_.fetch_add(1, std::memory_order_relaxed);
   }
+  if (recovered) logConfigRecovered(baseUrl_, "re-read");
   return true;
 }
 

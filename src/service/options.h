@@ -5,7 +5,12 @@
 namespace nova::service {
 
 struct Options {
-  std::string dashboardUrl = "http://127.0.0.1";
+  // The dashboard's own listener, NOT its browser ingress. Caddy owns port 80
+  // and routes by Host header, so a request to the bare 127.0.0.1 origin is
+  // answered 200 with an empty body -- which reads here as a config that did not
+  // parse, leaving the renderer with no module and the screen black. 3001 is
+  // what Caddy itself proxies to; see ops/nova-visualiser.defaults.
+  std::string dashboardUrl = "http://127.0.0.1:3001";
   int streamPort = 8770;
   int controlPort = 8771;
   // SRT rung for the Apple TV. Offered alongside the TCP rung on 8770, which
@@ -39,9 +44,10 @@ struct Options {
   double configPollSeconds = 15;
   float exposure = 1.0f;
 
-  // Release GPU memory when nothing is watching. The voice stack shares this
-  // GPU and only has a few gigabytes of headroom, so idling with a 4K pipeline
-  // resident would be rude at best.
+  // Release GPU memory when nothing is watching. This is this service's own idle
+  // policy -- nothing outside it asks for the card back -- but the GPU is shared
+  // with the voice stack, which has only a few gigabytes of headroom, so idling
+  // with a 4K pipeline resident would be rude at best.
   double idleReleaseSeconds = 30;
   // Encode cadence while nothing is playing. The scene is nearly static then,
   // so a full-rate CBR encode spends the whole bitrate padding a still image.

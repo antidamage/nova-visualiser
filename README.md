@@ -37,9 +37,33 @@ segmenting and player buffering, costing roughly one frame of pipeline.
 on nothing. Stopping, crashing or upgrading it cannot affect home control or the
 voice stack.
 
+**Nothing to draw means nothing sent.** A renderer that has never managed to read
+a configuration sends no frames at all rather than a flat one. A client that
+takes a frame hides its own implementation in favour of it, so a blank picture
+here is a black screen there; sending nothing keeps the Apple TV's own engine on
+screen, which is what it is for. The reason is in `/status` as `configError`, and
+in `/healthz` as `config: false` — that is the field which separates "nothing to
+draw" from "nothing to watch". `ok` in the same payload follows GPU residency
+alone, so an idle renderer that has released the card answers `ok: false` with a
+503: measured on the host, 503 while idle and 200 with one client attached.
+
+**Dashboard link.** Module selection, colours and settings come from the
+dashboard's own listener — `NOVA_VISUALISER_DASHBOARD`, default
+`http://127.0.0.1:3001`. Never through the household's browser ingress: Caddy owns
+port 80 and routes by Host header, so a request to `127.0.0.1` matches no site
+block and comes back `200` with an **empty body** — which reads here as a
+configuration that did not parse, so no module is loaded and nothing is drawn.
+Point the setting at the address Caddy itself proxies to: in the dashboard's own
+repo, `nova-ha-dashboard/ops/iridium/nova-ha-dashboard.service` sets `PORT=3001`
+and `NOVA_BIND_HOST=127.0.0.1`. That listener is loopback-only, so it needs no
+session and is unaffected by the auth gate in front of the browser surface.
+
 **VRAM management.** GL and encoder resources are released when no client is
-connected, returning VRAM to the voice stack. The GPU is shared: the voice stack
-holds roughly 6.5 GB of the card's 11 GB.
+connected, by this service's own idle policy (`--idle-release`, default 30 s) —
+nothing else asks it to release, and nothing else can take them from it.
+Measured with `nvidia-smi` on the host while a client was connected: a few MB
+while released, about 0.8 GB of the card's 11 GB while rendering, beside the
+voice stack's roughly 6.5 GB.
 
 **Client handling.** Each stream client gets its own writer thread. A slow client
 is dropped to the next IDR and never applies back-pressure to the GPU.

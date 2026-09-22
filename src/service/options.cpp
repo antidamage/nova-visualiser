@@ -9,7 +9,7 @@ std::string Options::usage() {
   return
       "nova-visualiser -- GPU Phonoscope renderer and stream server\n"
       "\n"
-      "  --dashboard <url>        dashboard origin (default http://127.0.0.1)\n"
+      "  --dashboard <url>        dashboard listener (default http://127.0.0.1:3001)\n"
       "  --stream-port <n>        Apple TV stream port (default 8770)\n"
       "  --control-port <n>       control/diagnostics port (default 8771)\n"
       "  --srt-port <n>           Apple TV SRT rung port, 0 disables (default 8772)\n"

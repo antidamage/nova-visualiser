@@ -731,6 +731,19 @@ void Engine::renderLoop() {
       continue;
     }
 
+    // Nothing to draw, so send nothing. A configuration that has never been read
+    // means no module and no palette to draw it in, and the frame this loop would
+    // encode is flat: a client that takes one drops its own working renderer and
+    // shows a black screen instead. Staying silent leaves the Apple TV's own
+    // Metal engine on screen, which is what it is there for, and `configError` in
+    // /status says why. A configuration that was read once and then lost is left
+    // alone -- the last known scene is a picture, and a picture beats nothing.
+    if (config_.revision() == 0) {
+      next += frameInterval;
+      sleepUntil(next);
+      continue;
+    }
+
     // The simulation runs at 120 Hz and the renderer at 60 Hz, so a rendered
     // frame usually sits exactly on a sim state. Interpolating anyway keeps the
     // motion smooth if either rate slips.
@@ -1197,8 +1210,17 @@ net::ControlResponse Engine::handleControl(const net::ControlRequest& request) {
     return response;
   }
   if (path == "/healthz") {
-    response.body = gpuReady_.load() ? R"({"ok":true})" : R"({"ok":false})";
-    response.status = gpuReady_.load() ? 200 : 503;
+    // `ok` keeps its old meaning -- is the GPU pipeline resident -- so this is an
+    // addition rather than a redefinition. Note what that meaning costs: it is
+    // false, with a 503, for as long as the idle policy has released the card,
+    // which is the ordinary state of a renderer nobody is watching. `config` is
+    // the field that separates "nothing to draw" from "nothing to watch"; a
+    // configuration never read at all used to look identical to a healthy service
+    // from here for weeks.
+    const bool ready = gpuReady_.load();
+    response.body = std::string("{\"ok\":") + (ready ? "true" : "false") +
+                    ",\"config\":" + (config_.revision() > 0 ? "true" : "false") + "}";
+    response.status = ready ? 200 : 503;
     return response;
   }
   if (request.method != "POST") {
