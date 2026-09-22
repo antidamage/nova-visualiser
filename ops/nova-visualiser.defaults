@@ -3,7 +3,19 @@
 # Apple TV rung: 4K60 HEVC Main10. AppleTV6,2 (Apple TV 4K, A10X) decodes this
 # in hardware; it has no AV1 decoder, and Turing NVENC has no AV1 encoder, so
 # HEVC is the ceiling on both ends rather than a compromise.
-NOVA_VISUALISER_DASHBOARD=http://127.0.0.1
+
+# The dashboard's OWN listener, not its browser ingress.
+#
+# Caddy owns port 80 and routes by Host header; `http://127.0.0.1` matches no
+# site block and is answered `200` with an EMPTY body. This service reads that as
+# a configuration that did not parse, loads no module, and streams an empty
+# picture -- a black television while the music and lyrics carry on.
+#
+# 3001 is what Caddy itself proxies to: nova-ha-dashboard's
+# ops/iridium/nova-ha-dashboard.service sets PORT=3001/NOVA_BIND_HOST=127.0.0.1.
+# Loopback-only, no session needed, and not behind the auth gate on the browser
+# surface.
+NOVA_VISUALISER_DASHBOARD=http://127.0.0.1:3001
 NOVA_VISUALISER_STREAM_PORT=8770
 NOVA_VISUALISER_CONTROL_PORT=8771
 NOVA_VISUALISER_SIZE=3840x2160
