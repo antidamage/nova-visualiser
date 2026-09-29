@@ -182,3 +182,8 @@ tests/        conformance corpus
 | **Fixed 1/120 s simulation step** | Makes simulation outcome independent of render rate, lets the renderer interpolate, and is what makes the conformance corpus reproducible at all. |
 | **Dynamic resolution scales the scene only** | The encode surface stays 4K, so stream resolution never changes under a client. It reacts to render cost alone — shrinking the scene does nothing for an encoder bottleneck. |
 | **Shutdown has a watchdog** | CUDA teardown can deadlock inside `libnvcuvid`, and a unit stuck in `deactivating` on this host is unacceptable. |
+
+## License
+
+Licensed under the GNU General Public License, version 3 only (GPL-3.0-only).
+See [LICENSE](LICENSE).
