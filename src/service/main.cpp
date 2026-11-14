@@ -75,9 +75,19 @@ int main(int argc, char** argv) {
               options.streamPort, options.controlPort);
   std::fflush(stdout);
 
-  if (!gEngine->run(error)) {
+  const bool ok = gEngine->run(error);
+  // Skip static destructors on every way out, as the one-shot modes do:
+  // libsrt's own exit-time finaliser segfaults in __cxa_finalize (measured on
+  // Iridium, libsrt-gnutls 1.5). A REQUESTED stop -- SIGTERM or the idle exit --
+  // is a success whatever non-fatal error was recorded during the run (a
+  // publish hiccup, an SRT rung that failed): exiting 1 there would make
+  // Restart=on-failure undo every idle exit (specs/idle-exit.md). Only a run
+  // that failed on its own (a port that would not bind) exits 1.
+  if (!ok && !gEngine->stopRequested()) {
     std::fprintf(stderr, "nova-visualiser: %s\n", error.c_str());
-    return 1;
+    std::fflush(nullptr);
+    _exit(1);
   }
-  return 0;
+  std::fflush(nullptr);
+  _exit(0);
 }

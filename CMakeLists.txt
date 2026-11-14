@@ -88,6 +88,7 @@ if(NOVA_VISUALISER_GPU)
     src/net/config_client.cpp
     src/net/stream_server.cpp
     src/net/control_server.cpp
+    src/net/socket_activation.cpp
     src/net/house_party.cpp
   )
   target_include_directories(nova-visualiser PRIVATE src ${CUDA_DRIVER_INCLUDE_DIR})
@@ -148,7 +149,12 @@ add_executable(nova-visualiser-conformance src/tools/conformance.cpp)
 target_include_directories(nova-visualiser-conformance PRIVATE src)
 target_link_libraries(nova-visualiser-conformance PRIVATE nova_visualiser_core)
 
+# Idle exit and socket activation (specs/idle-exit.md): no GPU or systemd needed.
+add_executable(nova-visualiser-lifecycle-tests src/tools/lifecycle_tests.cpp src/net/socket_activation.cpp)
+target_include_directories(nova-visualiser-lifecycle-tests PRIVATE src)
+
 enable_testing()
+add_test(NAME lifecycle COMMAND nova-visualiser-lifecycle-tests)
 add_test(NAME conformance
          COMMAND nova-visualiser-conformance --corpus ${CMAKE_CURRENT_SOURCE_DIR}/tests/conformance)
 

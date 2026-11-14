@@ -50,6 +50,10 @@ class Engine {
 
   bool run(std::string& error);
   void requestStop();
+  // True once SIGTERM or the idle exit asked the engine to stop: the process
+  // then exits 0 whatever non-fatal error was recorded on the way
+  // (specs/idle-exit.md).
+  bool stopRequested() const { return stopRequested_.load(std::memory_order_relaxed); }
 
   // Offline paths used by the deploy check and the conformance frame dumps.
   bool selfTest(int frames, std::string& error);
@@ -72,6 +76,7 @@ class Engine {
   net::ControlResponse handleControl(const net::ControlRequest& request);
 
   Options options_;
+  std::atomic<bool> stopRequested_{false};
   std::atomic<bool> running_{false};
 
   Simulation simulation_;

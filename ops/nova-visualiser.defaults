@@ -48,3 +48,8 @@ NOVA_VISUALISER_PUBLISH_BITRATE=8000000
 # Seconds with no connected client before the GPU resources are released back to
 # the voice stack, which shares this card and has only a few GB of headroom.
 NOVA_VISUALISER_IDLE_RELEASE=30
+
+# Seconds with no viewer and no music before the whole process ends
+# (specs/idle-exit.md). nova-visualiser.socket starts it again on the next
+# renderer lookup. 0 keeps it running for ever.
+NOVA_VISUALISER_IDLE_EXIT=300

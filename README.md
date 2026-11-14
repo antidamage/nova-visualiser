@@ -65,6 +65,8 @@ Measured with `nvidia-smi` on the host while a client was connected: a few MB
 while released, about 0.8 GB of the card's 11 GB while rendering, beside the
 voice stack's roughly 6.5 GB.
 
+**Idle exit and on-demand start.** With no viewer and no music for `--idle-exit` seconds (300 on Iridium) the process ends itself, exit 0. `nova-visualiser.socket` holds the control port (8771) and starts it again on the next renderer lookup, which is what the Apple TV and the debug page do when they want to watch. The GPU starts only when a viewer connects; a browser that skips the lookup cannot wake it. Measured cold start, lookup to past the first keyframe: 1.9 s. See `specs/idle-exit.md`.
+
 **Client handling.** Each stream client gets its own writer thread. A slow client
 is dropped to the next IDR and never applies back-pressure to the GPU.
 

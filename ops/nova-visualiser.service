@@ -3,6 +3,12 @@ Description=Nova visualiser (GPU Phonoscope renderer and stream server)
 Documentation=file:/opt/nova-visualiser/README.md
 After=network-online.target
 Wants=network-online.target
+# Started on demand by nova-visualiser.socket (the control port, 8771): the
+# dashboard's renderer lookup, which the Apple TV and the debug page make when
+# they want to watch, wakes it. It ends itself after --idle-exit seconds with no
+# viewer and no music (specs/idle-exit.md).
+Requires=nova-visualiser.socket
+After=nova-visualiser.socket
 # Give up rather than loop forever on a box that runs the whole house: a
 # renderer that cannot start should sit quiet and let the Apple TV fall back to
 # its local Metal engine. These belong in [Unit], not [Service].
@@ -31,7 +37,8 @@ ExecStart=/opt/nova-visualiser/bin/nova-visualiser \
   --publish ${NOVA_VISUALISER_PUBLISH} \
   --publish-size ${NOVA_VISUALISER_PUBLISH_SIZE} \
   --publish-bitrate ${NOVA_VISUALISER_PUBLISH_BITRATE} \
-  --idle-release ${NOVA_VISUALISER_IDLE_RELEASE}
+  --idle-release ${NOVA_VISUALISER_IDLE_RELEASE} \
+  --idle-exit ${NOVA_VISUALISER_IDLE_EXIT}
 
 Restart=on-failure
 RestartSec=5
@@ -64,5 +71,5 @@ DeviceAllow=/dev/nvidia-uvm rw
 DeviceAllow=/dev/nvidia-uvm-tools rw
 DeviceAllow=/dev/nvidia-modeset rw
 
-[Install]
-WantedBy=multi-user.target
+# No [Install] section: the service is not started at boot. The socket unit is
+# what is enabled, and it starts this on the first control-port connection.

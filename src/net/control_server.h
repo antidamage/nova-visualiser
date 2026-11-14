@@ -44,6 +44,8 @@ class ControlServer {
   void run();
 
   int listenSocket_ = -1;
+  // Passed in by systemd socket activation: shared, so never shutdown().
+  bool inherited_ = false;
   std::atomic<bool> running_{false};
   std::thread thread_;
   Handler handler_;

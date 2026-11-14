@@ -17,6 +17,7 @@
 #include "core/json.h"
 #include "core/picture_effects.h"
 #include "net/http_client.h"
+#include "service/idle_policy.h"
 
 namespace nova::service {
 namespace {
@@ -80,7 +81,10 @@ Engine::~Engine() {
   stopGpu();
 }
 
-void Engine::requestStop() { running_.store(false, std::memory_order_relaxed); }
+void Engine::requestStop() {
+  stopRequested_.store(true, std::memory_order_relaxed);
+  running_.store(false, std::memory_order_relaxed);
+}
 
 bool Engine::startGpu(std::string& error) {
   if (gpuReady_.load()) return true;
@@ -573,6 +577,12 @@ int Engine::publishDivisor() const {
 // in the frame-pacing loop.
 void Engine::watcherLoop() {
   double lastReaderPoll = 0;
+  // Idle exit (specs/idle-exit.md): no viewer and no music for idleExitSeconds
+  // ends the process through the same path as SIGTERM. systemd's socket unit
+  // starts it again on the next control-port lookup.
+  IdleExitPolicy idleExit;
+  idleExit.idleExitSeconds = options_.idleExitSeconds;
+  idleExit.start(monotonicSeconds());
   while (running_.load(std::memory_order_relaxed)) {
     const double now = monotonicSeconds();
 
@@ -624,6 +634,21 @@ void Engine::watcherLoop() {
       }
     }
 
+    int viewers = stream_.clientCount();
+#if NOVA_VISUALISER_HAVE_SRT
+    viewers += srt_.clientCount();
+#endif
+    const bool viewerConnected = viewers > 0 || browserWatching_.load(std::memory_order_relaxed);
+    const net::NowPlaying nowPlaying = config_.nowPlaying();
+    const bool musicPlaying = nowPlaying.valid && nowPlaying.playing;
+    idleExit.housePartyEnabled = houseParty_.enabled();
+    if (idleExit.shouldExit(now, viewerConnected, musicPlaying)) {
+      std::fprintf(stderr, "nova-visualiser: idle for %.0f s (no viewer, no music); exiting\n",
+                   options_.idleExitSeconds);
+      requestStop();
+      break;
+    }
+
     std::this_thread::sleep_for(std::chrono::milliseconds(250));
   }
 }
@@ -653,14 +678,12 @@ void Engine::simulationLoop() {
 }
 
 void Engine::renderLoop() {
-  std::string error;
-  if (!startGpu(error)) {
-    std::lock_guard<std::mutex> lock(statusMutex_);
-    statusError_ = error;
-    std::fprintf(stderr, "nova-visualiser: GPU start failed: %s\n", error.c_str());
-    running_.store(false);
-    return;
-  }
+  // The GPU is NOT started here any more: it starts when a viewer connects, on
+  // the loop's own on-demand path below (the same one it takes after the idle
+  // release). A socket-activated wake that no viewer follows -- a renderer
+  // lookup on its own -- then costs a process and the simulation, never a
+  // GL/CUDA/NVENC init (specs/idle-exit.md). GPU capability is still proven at
+  // deploy by nova-visualiser-probe.
 
   const double frameInterval = 1.0 / std::max(1, options_.frameRate);
   double next = monotonicSeconds();

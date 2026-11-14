@@ -25,6 +25,7 @@ std::string Options::usage() {
       "  --mediamtx-api <url>     MediaMTX API, used for the browser reader count\n"
       "  --exposure <f>           tonemap exposure (default 1.0)\n"
       "  --idle-release <s>       free GPU memory after this long with no client\n"
+      "  --idle-exit <s>          exit after this long with no viewer and no music (0 = never)\n"
       "  --house-party            drive house-party lighting from this service\n"
       "  --self-test <frames>     render N frames headlessly and report timing\n"
       "  --dump-frame <path>      write one composited RGBA frame and exit\n"
@@ -91,6 +92,8 @@ bool Options::parse(int argc, char** argv, Options& out, std::string& error) {
       out.exposure = static_cast<float>(std::atof(value.c_str()));
     } else if (flag == "--idle-release" && next(value)) {
       out.idleReleaseSeconds = std::atof(value.c_str());
+    } else if (flag == "--idle-exit" && next(value)) {
+      out.idleExitSeconds = std::atof(value.c_str());
     } else if (flag == "--idle-fps" && next(value)) {
       out.idleFrameRate = std::atoi(value.c_str());
     } else if (flag == "--house-party") {

@@ -49,6 +49,9 @@ struct Options {
   // with the voice stack, which has only a few gigabytes of headroom, so idling
   // with a 4K pipeline resident would be rude at best.
   double idleReleaseSeconds = 30;
+  // End the process after this long with no viewer and no music
+  // (specs/idle-exit.md). 0 = never. Ignored while house party is enabled.
+  double idleExitSeconds = 0;
   // Encode cadence while nothing is playing. The scene is nearly static then,
   // so a full-rate CBR encode spends the whole bitrate padding a still image.
   // Set equal to frameRate to disable.

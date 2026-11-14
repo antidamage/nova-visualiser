@@ -1,7 +1,10 @@
 #include "net/control_server.h"
 
+#include "net/socket_activation.h"
+
 #include <netinet/in.h>
 #include <netinet/tcp.h>
+#include <poll.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
@@ -13,6 +16,17 @@ ControlServer::~ControlServer() { stop(); }
 
 bool ControlServer::start(int port, Handler handler, std::string& error) {
   handler_ = std::move(handler);
+  // Socket activation (specs/idle-exit.md): when nova-visualiser.socket started
+  // this process for a connection on the control port, that connection is
+  // waiting on the listener systemd passed in. Adopt it; bind only when run by
+  // hand.
+  listenSocket_ = inheritedTcpListener(port);
+  if (listenSocket_ >= 0) {
+    inherited_ = true;
+    running_.store(true);
+    thread_ = std::thread(&ControlServer::run, this);
+    return true;
+  }
   listenSocket_ = ::socket(AF_INET, SOCK_STREAM, 0);
   if (listenSocket_ < 0) {
     error = "could not create the control socket";
@@ -45,6 +59,18 @@ bool ControlServer::start(int port, Handler handler, std::string& error) {
 
 void ControlServer::run() {
   while (running_.load(std::memory_order_relaxed)) {
+    // An inherited listener is shared with systemd, so stop() must not
+    // shutdown() it (that would break the socket unit too). Poll instead, so
+    // the loop still notices `running_` going false within a quarter second.
+    if (inherited_) {
+      pollfd ready{listenSocket_, POLLIN, 0};
+      if (::poll(&ready, 1, 250) <= 0) continue;
+      if (!(ready.revents & POLLIN)) {
+        // POLLERR/POLLNVAL: accept would fail at once; back off, never spin.
+        ::poll(nullptr, 0, 250);
+        continue;
+      }
+    }
     const int socketFd = ::accept(listenSocket_, nullptr, nullptr);
     if (socketFd < 0) {
       if (!running_.load(std::memory_order_relaxed)) break;
@@ -104,6 +130,13 @@ void ControlServer::run() {
 
 void ControlServer::stop() {
   if (!running_.exchange(false)) return;
+  if (inherited_) {
+    // Join first (the poll loop exits on its own), then close only our copy.
+    if (thread_.joinable()) thread_.join();
+    if (listenSocket_ >= 0) ::close(listenSocket_);
+    listenSocket_ = -1;
+    return;
+  }
   if (listenSocket_ >= 0) {
     ::shutdown(listenSocket_, SHUT_RDWR);
     ::close(listenSocket_);

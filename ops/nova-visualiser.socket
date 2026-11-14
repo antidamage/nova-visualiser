@@ -1,0 +1,17 @@
+[Unit]
+Description=Nova visualiser wake socket (control port; starts the renderer on demand)
+Documentation=file:/opt/nova-visualiser/README.md
+
+# The dashboard's renderer lookup (/api/phonoscope/renderer -> :8771/status) is
+# what the Apple TV and the debug page do when they want to watch, so a
+# connection here starts nova-visualiser.service, which adopts this listener.
+# The renderer ends itself when idle (specs/idle-exit.md); this stays listening.
+# The port must equal NOVA_VISUALISER_CONTROL_PORT: the service adopts the
+# inherited socket only when its port matches.
+[Socket]
+ListenStream=8771
+NoDelay=true
+Service=nova-visualiser.service
+
+[Install]
+WantedBy=sockets.target
